@@ -1,7 +1,7 @@
 /**
  * BonfireOS - Kernel main entry (64-bit)
  * Called from boot.asm after long mode is enabled.
- * Responsibilities: parse multiboot, init drivers, start shell.
+ * Responsibilities: parse multiboot, init drivers, processes, start shell.
  */
 
 #include <kernel/types.h>
@@ -12,9 +12,17 @@
 #include <kernel/irq.h>
 #include <kernel/keyboard.h>
 #include <kernel/shell.h>
+#include <kernel/process.h>
+#include <kernel/timer.h>
+#include <kernel/mm.h>
+#include <kernel/fat.h>
 
 #define MULTIBOOT_FLAG_MEM   (1 << 0)
-#define MULTIBOOT_FLAG_MMAP  (1 << 6)
+#define HEAP_SIZE            (256 * 1024)
+
+static uint8_t heap_region[HEAP_SIZE];
+
+extern void shell_run(void);
 
 void kernel_main(uint32_t magic, uint32_t multiboot_info_phys)
 {
@@ -41,11 +49,17 @@ void kernel_main(uint32_t magic, uint32_t multiboot_info_phys)
         }
     }
 
+    heap_init(heap_region, HEAP_SIZE);
+    shell_init();
     irq_init();
     idt_init();
+    process_init();
+    process_create(shell_run);
+    timer_init(100);
+    if (fat_mount() == 0)
+        vga_puts("FAT filesystem mounted.\n");
     __asm__ volatile ("sti");
 
-    shell_init();
     vga_puts("\n> ");
-    shell_run();
+    scheduler_first_run();
 }

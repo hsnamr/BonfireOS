@@ -1,7 +1,9 @@
 ; IDT handler stubs: call C handler with vector number, then EOI for IRQs
+; IRQ 0 (vector 32): timer -> scheduler_tick then context switch
 
 extern idt_irq_handler
 extern idt_exception_handler
+extern scheduler_tick
 
 %macro IRQ 1
 global irq%1
@@ -9,6 +11,46 @@ irq%1:
     push qword %1
     jmp irq_common
 %endmacro
+
+; Timer IRQ: save state, call scheduler_tick(rsp), switch to returned rsp
+global timer_irq
+timer_irq:
+    push qword 32
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    mov rdi, rsp
+    call scheduler_tick
+    mov rsp, rax
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add rsp, 8
+    iretq
 
 %macro EXC 1
 global exc%1
@@ -123,8 +165,7 @@ EXC 29
 EXC 30
 EXC 31
 
-; IRQs 0-15 (PIC)
-IRQ 32
+; IRQs 0-15 (PIC) — vector 32 = timer_irq, rest = irq33..irq47
 IRQ 33
 IRQ 34
 IRQ 35

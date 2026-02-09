@@ -13,8 +13,8 @@ extern void exc0(void),  exc1(void),  exc2(void),  exc3(void),  exc4(void),  exc
 extern void exc8(void),  exc9(void),  exc10(void), exc11(void), exc12(void), exc13(void), exc14(void), exc15(void);
 extern void exc16(void), exc17(void), exc18(void), exc19(void), exc20(void), exc21(void), exc22(void), exc23(void);
 extern void exc24(void), exc25(void), exc26(void), exc27(void), exc28(void), exc29(void), exc30(void), exc31(void);
-/* IRQs 32-47 */
-extern void irq32(void);
+/* IRQs 32-47; vector 32 = timer (scheduler) */
+extern void timer_irq(void);
 extern void irq33(void);
 extern void irq34(void);
 extern void irq35(void);
@@ -81,7 +81,7 @@ void idt_init(void)
 
     /* IRQ 0-15 -> vectors 32-47 */
     uint64_t *irq_handlers[] = {
-        (uint64_t *)irq32, (uint64_t *)irq33, (uint64_t *)irq34, (uint64_t *)irq35,
+        (uint64_t *)timer_irq, (uint64_t *)irq33, (uint64_t *)irq34, (uint64_t *)irq35,
         (uint64_t *)irq36, (uint64_t *)irq37, (uint64_t *)irq38, (uint64_t *)irq39,
         (uint64_t *)irq40, (uint64_t *)irq41, (uint64_t *)irq42, (uint64_t *)irq43,
         (uint64_t *)irq44, (uint64_t *)irq45, (uint64_t *)irq46, (uint64_t *)irq47,

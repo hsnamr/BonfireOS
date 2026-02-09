@@ -6,6 +6,7 @@
 #include <kernel/shell.h>
 #include <kernel/alias.h>
 #include <kernel/fs.h>
+#include <kernel/fat.h>
 #include <kernel/vga.h>
 #include <kernel/keyboard.h>
 #include <kernel/types.h>
@@ -27,7 +28,7 @@ static void next_arg(const char **p, char *buf, size_t max_len)
 
 static void cmd_help(void)
 {
-    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias\n");
+    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat\n");
 }
 
 static void cmd_clear(void)
@@ -92,6 +93,33 @@ static void cmd_cat(const char *args)
     if (n > 0 && buf[n-1] != '\n') vga_putchar('\n');
 }
 
+/* Read file from FAT root (8.3 name, e.g. FILE.TXT or FILE) */
+static void cmd_fatcat(const char *args)
+{
+    char name[12];
+    next_arg(&args, name, sizeof(name));
+    if (!name[0]) { vga_puts("fatcat: missing 8.3 filename\n"); return; }
+    char name_83[11];
+    size_t i = 0, j = 0;
+    for (; name[i] && name[i] != '.' && j < 8; i++) name_83[j++] = name[i];
+    while (j < 8) name_83[j++] = ' ';
+    if (name[i] == '.') i++;
+    for (; name[i] && j < 11; i++) name_83[j++] = name[i];
+    while (j < 11) name_83[j++] = ' ';
+    uint32_t cluster, size;
+    if (fat_find_root(name_83, &cluster, &size) != 0) {
+        vga_puts("fatcat: file not found on disk\n");
+        return;
+    }
+    char buf[FS_FILE_BUF];
+    if (size > sizeof(buf)) size = sizeof(buf);
+    int n = fat_read_file(cluster, size, buf);
+    if (n > 0) {
+        for (int k = 0; k < n; k++) vga_putchar(buf[k]);
+        if (n > 0 && buf[n-1] != '\n') vga_putchar('\n');
+    }
+}
+
 static void cmd_edit(const char *args)
 {
     char path[FS_PATH_MAX];
@@ -149,6 +177,7 @@ static void run_command(char *line)
     if (cmd[0] == 'c' && cmd[1] == 'a' && cmd[2] == 't' && !cmd[3]) { cmd_cat(p); return; }
     if (cmd[0] == 'e' && cmd[1] == 'd' && cmd[2] == 'i' && cmd[3] == 't' && !cmd[4]) { cmd_edit(p); return; }
     if (cmd[0] == 'a' && cmd[1] == 'l' && cmd[2] == 'i' && cmd[3] == 'a' && cmd[4] == 's' && !cmd[5]) { cmd_alias(p); return; }
+    if (cmd[0] == 'f' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == 'c' && cmd[4] == 'a' && cmd[5] == 't' && !cmd[6]) { cmd_fatcat(p); return; }
     vga_puts("Unknown command. Type 'help' for list.\n");
 }
 

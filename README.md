@@ -6,9 +6,11 @@ A minimal, modular x86_64 operating system from scratch: bootloader → kernel �
 
 - **Boot**: GRUB (Multiboot 1) loads the kernel; 32-bit boot stub switches to long mode and jumps to 64-bit kernel.
 - **Kernel**: C + assembly, with IDT, PIC, and basic interrupt handling.
-- **Drivers**: VGA text mode (80×25), PS/2 keyboard.
-- **FS**: In-memory minimal filesystem (mkdir, create, read, write, list, chdir). No persistence.
-- **Shell**: Commands: `help`, `clear`, `echo`, `ls`, `cd`, `mkdir`, `cat`, `edit`, `alias`.
+- **Processes & scheduling**: Round-robin scheduler, PIT timer (~100 Hz), context switch; idle process + shell process.
+- **Drivers**: VGA text mode (80×25), PS/2 keyboard, PIT timer, ATA PIO (disk).
+- **FS**: In-memory minimal filesystem (mkdir, create, read, write, list, chdir). FAT12/16 read from disk (mount at boot, `fatcat FILE.TXT`).
+- **POSIX layer**: `open`/`read`/`write`/`close`, `lseek`, `getcwd`/`chdir`/`mkdir`, `stat`; fd 0/1/2 = stdin/stdout/stderr.
+- **Shell**: Commands: `help`, `clear`, `echo`, `ls`, `cd`, `mkdir`, `cat`, `edit`, `alias`, `fatcat`.
 
 ## Quick start
 
@@ -34,6 +36,7 @@ A minimal, modular x86_64 operating system from scratch: bootloader → kernel �
    - `cat file` — print file  
    - `edit file` — create or overwrite file (single line)  
    - `alias ll ls` — alias `ll` to `ls`  
+   - `fatcat FILE.TXT` — read file from FAT root on disk (8.3 name)  
    - `echo hello` — print text  
    - `clear` — clear screen  
 
@@ -44,14 +47,17 @@ BonfireOS/
 ├── Makefile           # Build: kernel, ISO, QEMU targets
 ├── linker.ld          # Kernel link layout (sections, stack)
 ├── scripts/grub.cfg   # GRUB menu for ISO
-├── include/kernel/    # Headers (vga, port, idt, irq, keyboard, fs, shell, alias)
+├── include/kernel/   # Headers (vga, port, idt, irq, keyboard, fs, fat, ata, process, timer, posix, shell, alias)
 ├── src/
-│   ├── boot/boot.asm      # Multiboot header, 32-bit init, long mode switch, 64-bit entry
-│   ├── kernel/kernel.c    # kernel_main: multiboot parse, init, shell
-│   ├── kernel/arch/       # idt.c, idt_asm.asm, irq.c
-│   ├── kernel/drivers/   # vga.c, keyboard.c
-│   ├── kernel/fs/fs.c     # In-memory FS
-│   └── kernel/shell/      # shell.c, alias.c
+│   ├── boot/boot.asm         # Multiboot, long mode switch, 64-bit entry
+│   ├── kernel/kernel.c       # kernel_main: init, process, shell
+│   ├── kernel/arch/          # idt.c, idt_asm.asm, context_switch.asm, irq.c
+│   ├── kernel/drivers/      # vga.c, keyboard.c, timer.c, ata.c
+│   ├── kernel/fs/            # fs.c (in-memory), fat.c (FAT12/16)
+│   ├── kernel/mm/heap.c     # Bump allocator
+│   ├── kernel/process/      # process.c (PCB, scheduler)
+│   ├── kernel/posix/        # posix.c (open/read/write/close, etc.)
+│   └── kernel/shell/        # shell.c, alias.c
 └── docs/
     ├── BUILD.md
     └── ARCHITECTURE.md
@@ -61,10 +67,12 @@ BonfireOS/
 
 1. **Bootloader** — GRUB + multiboot; assembly stub and long mode.
 2. **Kernel init** — GDT, IDT, PIC, VGA, keyboard.
-3. **Memory** — (Planned) paging, physical allocator, heap.
-4. **Drivers** — VGA, keyboard (done); disk I/O (planned).
-5. **Filesystem** — In-memory FS (done); FAT or persistent FS (planned).
-6. **Shell** — Commands and alias (done).
+3. **Process/scheduling** — PCB, context switch, PIT timer, round-robin (idle + shell).
+4. **Memory** — Heap (bump allocator) for process stacks.
+5. **Drivers** — VGA, keyboard, timer, ATA PIO (disk).
+6. **Filesystem** — In-memory FS; FAT12/16 read from disk.
+7. **POSIX layer** — open/read/write/close, getcwd/chdir/mkdir, stat.
+8. **Shell** — Commands and alias, fatcat.
 
 ## License
 
