@@ -9,18 +9,30 @@ The kernel is built with a **cross-compiler** so it does not link against the ho
 - **Arch Linux**: `sudo pacman -S arm-none-eabi-gcc` does not provide x86_64-elf. Use below or [osdev.org toolchain](https://wiki.osdev.org/GCC_Cross-Compiler).
 - **Ubuntu/Debian**: No official `x86_64-elf-gcc` package. Build the cross-compiler (Option 2) or use a Docker image.
 
-### Option 2: Build GCC cross-compiler
+### Option 2: Build GCC cross-compiler (recommended)
+
+Use the project script to download and build **binutils** and **GCC** for `x86_64-elf`. Install prefix defaults to `$HOME/.local` (no sudo needed for the toolchain itself).
 
 ```bash
-# Install dependencies (Ubuntu/Debian)
-sudo apt install build-essential nasm git
+# Install dependencies (Ubuntu/Debian) — run once, requires sudo
+sudo apt install -y build-essential bison flex libgmp-dev libmpc-dev libmpfr-dev texinfo nasm curl
 
-# Download and build (example: use osdev.org instructions)
-# Binutils and GCC for target x86_64-elf, install to /usr/local
-# Then ensure /usr/local/bin is in PATH so x86_64-elf-gcc and x86_64-elf-ld are found.
+# Build and install toolchain (~30–60 min). Installs to $HOME/.local by default.
+chmod +x scripts/install-toolchain.sh
+./scripts/install-toolchain.sh
+
+# Add to PATH (e.g. in ~/.bashrc)
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-See [GCC Cross-Compiler (OSDev)](https://wiki.osdev.org/GCC_Cross-Compiler) for step-by-step instructions.
+Optional: install to a different prefix, or skip the dependency step if already installed:
+
+```bash
+./scripts/install-toolchain.sh /usr/local   # needs sudo for install
+./scripts/install-toolchain.sh --no-deps    # skip apt step
+```
+
+See [GCC Cross-Compiler (OSDev)](https://wiki.osdev.org/GCC_Cross-Compiler) for manual steps.
 
 ### Option 3: Use Docker (if available)
 
