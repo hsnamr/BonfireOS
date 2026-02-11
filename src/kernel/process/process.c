@@ -6,6 +6,7 @@
 #include <kernel/process.h>
 #include <kernel/mm.h>
 #include <kernel/irq.h>
+#include <kernel/timer.h>
 #include <kernel/types.h>
 
 #define STACK_ALIGN 16
@@ -87,6 +88,7 @@ void process_create(void (*entry)(void))
 uint64_t scheduler_tick(uint64_t current_rsp)
 {
     irq_eoi(0);  /* timer IRQ0 */
+    timer_tick();
     if (!current_process) return current_rsp;
     current_process->saved_rsp = current_rsp;
     current_process->state = PROC_RUNNABLE;

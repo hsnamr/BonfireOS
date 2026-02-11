@@ -10,7 +10,8 @@ A minimal, modular x86_64 operating system from scratch: bootloader → kernel �
 - **Drivers**: VGA text mode (80×25), PS/2 keyboard, PIT timer, ATA PIO (disk).
 - **FS**: In-memory minimal filesystem (mkdir, create, read, write, list, chdir). FAT12/16 read from disk (mount at boot, `fatcat FILE.TXT`).
 - **POSIX layer**: `open`/`read`/`write`/`close`, `lseek`, `getcwd`/`chdir`/`mkdir`, `stat`; fd 0/1/2 = stdin/stdout/stderr.
-- **Shell**: Commands: `help`, `clear`, `echo`, `ls`, `cd`, `mkdir`, `cat`, `edit`, `alias`, `fatcat`.
+- **Shell**: Commands: `help`, `clear`, `echo`, `ls`, `cd`, `mkdir`, `cat`, `edit`, `alias`, `fatcat`, `DOOM`.
+- **DOOM host API**: Video (mode 13h), input (keyboard scancodes + mouse), time, malloc/free, file I/O. Type `DOOM` to run a linked DOOM port; see [docs/DOOM_PORT.md](docs/DOOM_PORT.md).
 
 ## Quick start
 

@@ -15,6 +15,11 @@ static size_t keybuf_head;
 static size_t keybuf_tail;
 static bool keybuf_full;
 
+#define SCEV_BUF_SIZE 64
+struct scancode_ev { uint8_t sc; int down; };
+static struct scancode_ev scev_buf[SCEV_BUF_SIZE];
+static size_t scev_head, scev_tail, scev_count;
+
 /* US QWERTY scancode set 1 -> ASCII (make codes only; ignore break for simplicity) */
 static const char scancode_to_ascii[128] = {
     0,  27, '1','2','3','4','5','6','7','8','9','0','-','=', '\b',
@@ -30,7 +35,15 @@ static const char scancode_to_ascii[128] = {
 void keyboard_irq_handler(void)
 {
     uint8_t sc = inb(KEYB_DATA);
-    if (sc & 0x80) return; /* break code */
+    int down = !(sc & 0x80);
+    if (!down) sc &= 0x7F;
+    if (scev_count < SCEV_BUF_SIZE) {
+        scev_buf[scev_head].sc = sc;
+        scev_buf[scev_head].down = down;
+        scev_head = (scev_head + 1) % SCEV_BUF_SIZE;
+        scev_count++;
+    }
+    if (!down) return;
     if (sc >= 128) return;
     char c = scancode_to_ascii[sc];
     if (!c) return;
@@ -49,4 +62,20 @@ char keyboard_getchar(void)
     keybuf_tail = (keybuf_tail + 1) % KEYBUF_SIZE;
     keybuf_full = false;
     return c;
+}
+
+int keyboard_get_scancode(uint8_t *scancode, int *down)
+{
+    if (scev_count == 0) return 0;
+    *scancode = scev_buf[scev_tail].sc;
+    *down = scev_buf[scev_tail].down;
+    scev_tail = (scev_tail + 1) % SCEV_BUF_SIZE;
+    scev_count--;
+    return 1;
+}
+
+void keyboard_clear_scancodes(void)
+{
+    scev_tail = scev_head;
+    scev_count = 0;
 }

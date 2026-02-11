@@ -9,6 +9,8 @@
 #include <kernel/fat.h>
 #include <kernel/vga.h>
 #include <kernel/keyboard.h>
+#include <kernel/doom_host.h>
+#include <kernel/mouse.h>
 #include <kernel/types.h>
 
 #define LINE_MAX 256
@@ -28,7 +30,7 @@ static void next_arg(const char **p, char *buf, size_t max_len)
 
 static void cmd_help(void)
 {
-    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat\n");
+    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM\n");
 }
 
 static void cmd_clear(void)
@@ -160,6 +162,19 @@ static void cmd_alias(const char *args)
     else vga_puts("ok\n");
 }
 
+static void cmd_doom(const char *args)
+{
+    (void)args;
+    doom_video_enter();
+    mouse_init();
+    doom_input_clear();
+    static char *argv[] = { "DOOM", NULL };
+    int ret = doom_main(1, argv);
+    doom_video_leave();
+    if (ret != 0)
+        vga_puts("DOOM not available (link a DOOM port to provide doom_main).\n");
+}
+
 static void run_command(char *line)
 {
     alias_parse_and_expand(line, expanded_buf, sizeof(expanded_buf));
@@ -178,6 +193,7 @@ static void run_command(char *line)
     if (cmd[0] == 'e' && cmd[1] == 'd' && cmd[2] == 'i' && cmd[3] == 't' && !cmd[4]) { cmd_edit(p); return; }
     if (cmd[0] == 'a' && cmd[1] == 'l' && cmd[2] == 'i' && cmd[3] == 'a' && cmd[4] == 's' && !cmd[5]) { cmd_alias(p); return; }
     if (cmd[0] == 'f' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == 'c' && cmd[4] == 'a' && cmd[5] == 't' && !cmd[6]) { cmd_fatcat(p); return; }
+    if (cmd[0] == 'D' && cmd[1] == 'O' && cmd[2] == 'O' && cmd[3] == 'M' && !cmd[4]) { cmd_doom(p); return; }
     vga_puts("Unknown command. Type 'help' for list.\n");
 }
 
