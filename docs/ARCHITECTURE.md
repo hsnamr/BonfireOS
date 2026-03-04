@@ -70,6 +70,11 @@ Paging: identity map only for the first 2 MiB; no high-half mapping yet.
 - **API**: open, read, write, close, lseek, getcwd, chdir, mkdir, stat; errno set on error.
 - Implementations in `posix/posix.c` use fs_* and VGA/keyboard; no syscall gate yet (direct kernel calls).
 
+## Game ports (host APIs)
+
+- **DOOM**: `include/kernel/doom_host.h` — video (mode 13h), input, time, malloc, file I/O. Shell command `DOOM` runs `doom_main()`. See `docs/DOOM_PORT.md`.
+- **Red Alert**: `include/kernel/redalert_host.h` — same video/input/time/file plus dedicated heap, and **stub** audio (SOS) and network (GCL/IPX) so a C&C Red Alert port can link. Shell command `REDALERT` runs `redalert_main()`. See `docs/REDALERT_PORT.md`.
+
 ## Extensions (planned)
 
 - Physical frame allocator (e.g. bitmap from multiboot memory map).

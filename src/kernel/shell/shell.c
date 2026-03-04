@@ -10,6 +10,7 @@
 #include <kernel/vga.h>
 #include <kernel/keyboard.h>
 #include <kernel/doom_host.h>
+#include <kernel/redalert_host.h>
 #include <kernel/mouse.h>
 #include <kernel/types.h>
 
@@ -30,7 +31,7 @@ static void next_arg(const char **p, char *buf, size_t max_len)
 
 static void cmd_help(void)
 {
-    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM\n");
+    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM REDALERT\n");
 }
 
 static void cmd_clear(void)
@@ -175,6 +176,19 @@ static void cmd_doom(const char *args)
         vga_puts("DOOM not available (link a DOOM port to provide doom_main).\n");
 }
 
+static void cmd_redalert(const char *args)
+{
+    (void)args;
+    redalert_video_enter();
+    mouse_init();
+    redalert_input_clear();
+    static char *argv[] = { "REDALERT", NULL };
+    int ret = redalert_main(1, argv);
+    redalert_video_leave();
+    if (ret != 0)
+        vga_puts("Red Alert not available (link a Red Alert port to provide redalert_main).\n");
+}
+
 static void run_command(char *line)
 {
     alias_parse_and_expand(line, expanded_buf, sizeof(expanded_buf));
@@ -194,6 +208,7 @@ static void run_command(char *line)
     if (cmd[0] == 'a' && cmd[1] == 'l' && cmd[2] == 'i' && cmd[3] == 'a' && cmd[4] == 's' && !cmd[5]) { cmd_alias(p); return; }
     if (cmd[0] == 'f' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == 'c' && cmd[4] == 'a' && cmd[5] == 't' && !cmd[6]) { cmd_fatcat(p); return; }
     if (cmd[0] == 'D' && cmd[1] == 'O' && cmd[2] == 'O' && cmd[3] == 'M' && !cmd[4]) { cmd_doom(p); return; }
+    if (cmd[0] == 'R' && cmd[1] == 'E' && cmd[2] == 'D' && cmd[3] == 'A' && cmd[4] == 'L' && cmd[5] == 'E' && cmd[6] == 'R' && cmd[7] == 'T' && !cmd[8]) { cmd_redalert(p); return; }
     vga_puts("Unknown command. Type 'help' for list.\n");
 }
 
