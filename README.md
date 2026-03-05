@@ -76,5 +76,4 @@ BonfireOS/
 8. **Shell** — Commands and alias, fatcat.
 
 ## License
-
-MIT or similar; use and extend as you like.
+GNU Affero General Public License v3.0
