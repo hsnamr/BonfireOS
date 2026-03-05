@@ -48,6 +48,16 @@ make run-iso  # Run ISO in QEMU
 make clean    # Remove build/
 ```
 
+### Optional GUI
+
+The kernel includes an optional **1980s-style GUI** (Mode 13h, CGA-style palette). By default it is **enabled**. To build a **CLI-only** kernel without the GUI:
+
+```bash
+make no-gui   # or: make ENABLE_GUI=0
+```
+
+With the GUI enabled, type `gui` at the shell prompt to switch to the graphical interface; press any key to return to the CLI.
+
 ## Requirements
 
 - **nasm** (Netwide Assembler)

@@ -13,6 +13,9 @@
 #include <kernel/redalert_host.h>
 #include <kernel/mouse.h>
 #include <kernel/types.h>
+#if ENABLE_GUI
+#include <kernel/gui.h>
+#endif
 
 #define LINE_MAX 256
 
@@ -31,7 +34,11 @@ static void next_arg(const char **p, char *buf, size_t max_len)
 
 static void cmd_help(void)
 {
-    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM REDALERT\n");
+    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM REDALERT");
+#if ENABLE_GUI
+    vga_puts(" gui");
+#endif
+    vga_puts("\n");
 }
 
 static void cmd_clear(void)
@@ -189,6 +196,14 @@ static void cmd_redalert(const char *args)
         vga_puts("Red Alert not available (link a Red Alert port to provide redalert_main).\n");
 }
 
+#if ENABLE_GUI
+static void cmd_gui(const char *args)
+{
+    (void)args;
+    gui_run();
+}
+#endif
+
 static void run_command(char *line)
 {
     alias_parse_and_expand(line, expanded_buf, sizeof(expanded_buf));
@@ -209,6 +224,11 @@ static void run_command(char *line)
     if (cmd[0] == 'f' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == 'c' && cmd[4] == 'a' && cmd[5] == 't' && !cmd[6]) { cmd_fatcat(p); return; }
     if (cmd[0] == 'D' && cmd[1] == 'O' && cmd[2] == 'O' && cmd[3] == 'M' && !cmd[4]) { cmd_doom(p); return; }
     if (cmd[0] == 'R' && cmd[1] == 'E' && cmd[2] == 'D' && cmd[3] == 'A' && cmd[4] == 'L' && cmd[5] == 'E' && cmd[6] == 'R' && cmd[7] == 'T' && !cmd[8]) { cmd_redalert(p); return; }
+#if ENABLE_GUI
+    if (cmd[0] == 'g' && cmd[1] == 'u' && cmd[2] == 'i' && !cmd[3]) { cmd_gui(p); return; }
+#else
+    if (cmd[0] == 'g' && cmd[1] == 'u' && cmd[2] == 'i' && !cmd[3]) { vga_puts("The OS was built without a GUI.\n"); return; }
+#endif
     vga_puts("Unknown command. Type 'help' for list.\n");
 }
 

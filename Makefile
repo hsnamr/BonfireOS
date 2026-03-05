@@ -9,10 +9,13 @@ AS       := nasm
 OBJCOPY  := x86_64-elf-objcopy
 GRUB_MKRESCUE := grub-mkrescue
 
+# Optional GUI (1980s-style). Set ENABLE_GUI=0 to build without GUI.
+ENABLE_GUI ?= 1
+
 # Flags
 CFLAGS   := -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
             -m64 -march=x86-64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-            -Wall -Wextra -O2 -g -I include
+            -Wall -Wextra -O2 -g -I include -DENABLE_GUI=$(ENABLE_GUI)
 ASFLAGS  := -f elf64
 LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T linker.ld
 
@@ -25,8 +28,15 @@ ISO_BOOT := $(ISO)/boot
 GRUB_CFG := scripts/grub.cfg
 
 # Kernel objects (C and ASM) — mirror src/ under build/obj/
-C_SRCS   := $(shell find src -name '*.c')
-ASM_SRCS := $(shell find src -name '*.asm' -o -name '*.s')
+# When ENABLE_GUI=0, exclude GUI sources so the kernel builds without GUI.
+C_SRCS_ALL := $(shell find src -name '*.c')
+GUI_SRCS   := $(wildcard src/kernel/gui/*.c)
+ifeq ($(ENABLE_GUI),0)
+C_SRCS     := $(filter-out $(GUI_SRCS),$(C_SRCS_ALL))
+else
+C_SRCS     := $(C_SRCS_ALL)
+endif
+ASM_SRCS   := $(shell find src -name '*.asm' -o -name '*.s')
 C_OBJS   := $(patsubst src/%.c,$(OBJ)/%.o,$(C_SRCS))
 ASM_OBJS := $(patsubst src/%.asm,$(OBJ)/%.o,$(filter %.asm,$(ASM_SRCS)))
 ASM_OBJS += $(patsubst src/%.s,$(OBJ)/%.o,$(filter %.s,$(ASM_SRCS)))
@@ -36,9 +46,13 @@ OBJS     := $(C_OBJS) $(ASM_OBJS)
 KERNEL_BIN := $(BUILD)/kernel.bin
 ISO_IMG    := $(BUILD)/bonfireos.iso
 
-.PHONY: all clean run iso dirs
+.PHONY: all clean run iso dirs no-gui
 
 all: dirs $(KERNEL_BIN)
+
+# Build without the optional GUI (CLI-only kernel).
+no-gui:
+	$(MAKE) all ENABLE_GUI=0
 
 dirs:
 	@mkdir -p $(BOOT) $(OBJ) $(shell dirname $(C_OBJS)) $(shell dirname $(ASM_OBJS))
