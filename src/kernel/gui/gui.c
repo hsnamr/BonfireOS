@@ -1,181 +1,832 @@
 /**
- * Optional 1980s-style GUI for BonfireOS.
- * Uses VGA Mode 13h (320x200, 256 colors) with a CGA/EGA-inspired palette.
- * Chunky windows, thick borders, title bar — launch from CLI with "gui".
+ * GEM / Windows 3 style desktop: Program Manager, File Manager, utilities.
  */
 
 #include <kernel/gui.h>
+#include <kernel/gui_draw.h>
 #include <kernel/video_mode13.h>
 #include <kernel/keyboard.h>
+#include <kernel/mouse.h>
+#include <kernel/timer.h>
+#include <kernel/fs.h>
 #include <kernel/types.h>
 
-#define W   320
-#define H   200
+typedef enum {
+    APP_NONE = 0,
+    APP_PROGRAM_MANAGER,
+    APP_FILE_MANAGER,
+    APP_CALCULATOR,
+    APP_NOTEPAD,
+    APP_CLOCK,
+    APP_SNAKE,
+} AppId;
 
-/* CGA/EGA-style 16-color palette (RGB 0–63 per channel) */
-static const uint8_t gui_palette[256 * 3] = {
-    /* 0–15: classic CGA */
-    0,   0,   0,   /*  0 black */
-    0,   0,  42,   /*  1 blue */
-    0,  42,   0,   /*  2 green */
-    0,  42,  42,   /*  3 cyan */
-    42,  0,   0,   /*  4 red */
-    42,  0,  42,   /*  5 magenta */
-    42, 21,   0,   /*  6 brown */
-    42, 42,  42,   /*  7 light gray */
-    21, 21,  21,   /*  8 dark gray */
-    21, 21,  63,   /*  9 bright blue */
-    21, 63,  21,   /* 10 bright green */
-    21, 63,  63,   /* 11 bright cyan */
-    63, 21,  21,   /* 12 bright red */
-    63, 21,  63,   /* 13 bright magenta */
-    63, 63,  21,   /* 14 yellow */
-    63, 63,  63,   /* 15 white */
-};
+#define MAX_STACK 8
+#define FM_MAX_NAMES 32
+#define NOTE_BUF 4096
+#define CALC_MAX 24
+#define SNAKE_MAX 64
+#define GRID_W 20
+#define GRID_H 12
+#define CELL 6
 
-enum {
-    C_BLACK,
-    C_BLUE,
-    C_GREEN,
-    C_CYAN,
-    C_RED,
-    C_MAGENTA,
-    C_BROWN,
-    C_LTGRAY,
-    C_DKGRAY,
-    C_BR_BLUE,
-    C_BR_GREEN,
-    C_BR_CYAN,
-    C_BR_RED,
-    C_BR_MAGENTA,
-    C_YELLOW,
-    C_WHITE,
-};
+static AppId stack[MAX_STACK];
+static int stack_n;
 
-static void fill_rect(uint8_t *fb, int x0, int y0, int w, int h, uint8_t color)
+static int mx, my;
+static int prev_btn;
+
+static size_t str_len(const char *s)
 {
-    if (x0 < 0) { w += x0; x0 = 0; }
-    if (y0 < 0) { h += y0; y0 = 0; }
-    if (x0 + w > W) w = W - x0;
-    if (y0 + h > H) h = H - y0;
-    if (w <= 0 || h <= 0) return;
-    for (int y = 0; y < h; y++) {
-        uint8_t *row = fb + (y0 + y) * W + x0;
-        for (int x = 0; x < w; x++)
-            row[x] = color;
+    size_t n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static void str_cpy(char *d, const char *s, size_t max)
+{
+    size_t i = 0;
+    while (s[i] && i + 1 < max) { d[i] = s[i]; i++; }
+    d[i] = '\0';
+}
+
+static void path_join(char *out, const char *cwd, const char *name, int strip_slash)
+{
+    size_t i = 0;
+    while (cwd[i] && i < FS_PATH_MAX - 1) { out[i] = cwd[i]; i++; }
+    if (i == 0 || out[i - 1] != '/') out[i++] = '/';
+    size_t j = 0;
+    while (name[j] && i < FS_PATH_MAX - 1) {
+        if (strip_slash && name[j] == '/') break;
+        out[i++] = name[j++];
+    }
+    if (strip_slash && i > 0 && out[i - 1] == '/') i--;
+    out[i] = '\0';
+}
+
+static struct {
+    int pm_sel;
+    char fm_cwd[FS_PATH_MAX];
+    int fm_count;
+    char fm_names[FM_MAX_NAMES][FS_NAME_MAX + 4];
+    int fm_sel;
+    char calc_disp[CALC_MAX];
+    char calc_entry[CALC_MAX];
+    int calc_op;
+    long long calc_acc;
+    int calc_have_acc;
+    char note_buf[NOTE_BUF];
+    int note_len;
+    int note_cursor;
+    char note_path[FS_PATH_MAX];
+    int clk_mode;
+    uint32_t clk_sw_start;
+    uint32_t clk_sw_acc;
+    int clk_sw_running;
+    uint32_t clk_timer_deadline;
+    int clk_timer_active;
+    char clk_digits[8];
+    int clk_digit_len;
+    uint32_t clk_alarm_at;
+    int clk_alarm_armed;
+    int snake_x[SNAKE_MAX], snake_y[SNAKE_MAX];
+    int snake_len;
+    int snake_dir;
+    int snake_fx, snake_fy;
+    uint32_t snake_next_tick;
+    int snake_alive;
+} G;
+
+static void stack_push(AppId a)
+{
+    if (stack_n < MAX_STACK)
+        stack[stack_n++] = a;
+}
+
+static void stack_pop(void)
+{
+    if (stack_n > 0)
+        stack_n--;
+}
+
+static AppId stack_top(void)
+{
+    return stack_n ? stack[stack_n - 1] : APP_NONE;
+}
+
+static void fm_refresh(void)
+{
+    char listbuf[512];
+    fs_get_cwd(G.fm_cwd, sizeof(G.fm_cwd));
+    if (fs_list(NULL, listbuf, sizeof(listbuf)) != 0) {
+        G.fm_count = 0;
+        return;
+    }
+    G.fm_count = 0;
+    const char *p = listbuf;
+    while (*p && G.fm_count < FM_MAX_NAMES) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        size_t i = 0;
+        while (*p && *p != ' ' && i < sizeof(G.fm_names[0]) - 1)
+            G.fm_names[G.fm_count][i++] = *p++;
+        G.fm_names[G.fm_count][i] = '\0';
+        G.fm_count++;
     }
 }
 
-/* 8x8 chunky font: each byte is a row, MSB = left pixel (1 = foreground) */
-static const uint8_t font_8x8[256][8] = {
-    [0] = { 0, 0, 0, 0, 0, 0, 0, 0 },
-    [' '] = { 0, 0, 0, 0, 0, 0, 0, 0 },
-    ['B'] = { 0x7E, 0x63, 0x63, 0x7F, 0x63, 0x63, 0x7E, 0 },
-    ['o'] = { 0, 0, 0x3E, 0x63, 0x63, 0x63, 0x3E, 0 },
-    ['n'] = { 0, 0, 0x6E, 0x73, 0x63, 0x63, 0x63, 0 },
-    ['f'] = { 0x1C, 0x36, 0x06, 0x1F, 0x06, 0x06, 0x06, 0 },
-    ['i'] = { 0, 0x0C, 0, 0x0C, 0x0C, 0x0C, 0x0C, 0 },
-    ['r'] = { 0, 0, 0x6E, 0x33, 0x03, 0x03, 0x03, 0 },
-    ['e'] = { 0, 0, 0x3E, 0x63, 0x7F, 0x03, 0x3E, 0 },
-    ['O'] = { 0x3C, 0x66, 0x63, 0x63, 0x63, 0x66, 0x3C, 0 },
-    ['S'] = { 0x3E, 0x63, 0x03, 0x3E, 0x60, 0x63, 0x3E, 0 },
-    ['G'] = { 0x3C, 0x66, 0x03, 0x73, 0x63, 0x66, 0x7C, 0 },
-    ['U'] = { 0x63, 0x63, 0x63, 0x63, 0x63, 0x63, 0x3E, 0 },
-    ['I'] = { 0x3F, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0 },
-    ['P'] = { 0x7F, 0x63, 0x63, 0x7F, 0x03, 0x03, 0x03, 0 },
-    ['a'] = { 0, 0, 0x3E, 0x60, 0x7E, 0x63, 0x7E, 0 },
-    ['k'] = { 0, 0x63, 0x66, 0x6C, 0x78, 0x6C, 0x66, 0 },
-    ['y'] = { 0, 0, 0x63, 0x63, 0x63, 0x62, 0x3C, 0 },
-    ['t'] = { 0x0C, 0x0C, 0x3F, 0x0C, 0x0C, 0x0C, 0x38, 0 },
-    ['u'] = { 0, 0, 0x63, 0x63, 0x63, 0x67, 0x3B, 0 },
-    ['s'] = { 0, 0, 0x3E, 0x03, 0x3E, 0x60, 0x3E, 0 },
-    ['h'] = { 0, 0x63, 0x63, 0x73, 0x6B, 0x67, 0x63, 0 },
-    ['l'] = { 0, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0 },
-    ['c'] = { 0, 0, 0x3E, 0x63, 0x03, 0x63, 0x3E, 0 },
-    ['C'] = { 0x3C, 0x66, 0x03, 0x03, 0x03, 0x66, 0x3C, 0 },
-    ['L'] = { 0x03, 0x03, 0x03, 0x03, 0x03, 0x63, 0x7F, 0 },
-    ['R'] = { 0x6E, 0x33, 0x33, 0x3E, 0x36, 0x33, 0x73, 0 },
-    ['('] = { 0x18, 0x0C, 0x06, 0x06, 0x06, 0x0C, 0x18, 0 },
-    [')'] = { 0x06, 0x0C, 0x18, 0x18, 0x18, 0x0C, 0x06, 0 },
-    ['['] = { 0x3F, 0x03, 0x03, 0x03, 0x03, 0x03, 0x3F, 0 },
-    [']'] = { 0x3F, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3F, 0 },
-    ['1'] = { 0x0C, 0x1C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3F, 0 },
-    ['9'] = { 0x3E, 0x63, 0x63, 0x3F, 0x60, 0x63, 0x3E, 0 },
-    ['8'] = { 0x3E, 0x63, 0x63, 0x3E, 0x63, 0x63, 0x3E, 0 },
-    ['5'] = { 0x7F, 0x03, 0x03, 0x3E, 0x60, 0x63, 0x3E, 0 },
-    ['.'] = { 0, 0, 0, 0, 0, 0x0C, 0x0C, 0 },
-};
-
-static void draw_char_8x8(uint8_t *fb, int x, int y, char c, uint8_t fg, uint8_t bg)
+static void fm_parent(void)
 {
-    if (c < 0 || c >= 128) c = ' ';
-    const uint8_t *glyph = font_8x8[(unsigned char)c];
-    for (int row = 0; row < 8; row++) {
-        uint8_t bits = glyph[row];
-        for (int col = 0; col < 8; col++) {
-            uint8_t color = (bits & 0x80) ? fg : bg;
-            int px = x + col;
-            int py = y + row;
-            if (px >= 0 && px < W && py >= 0 && py < H)
-                fb[py * W + px] = color;
-            bits <<= 1;
+    size_t n = str_len(G.fm_cwd);
+    if (n <= 1) return;
+    while (n > 1 && G.fm_cwd[n - 1] != '/') n--;
+    if (n == 0) {
+        G.fm_cwd[0] = '/';
+        G.fm_cwd[1] = '\0';
+    } else {
+        G.fm_cwd[n] = '\0';
+    }
+    fs_chdir(G.fm_cwd);
+    fm_refresh();
+    G.fm_sel = 0;
+}
+
+static void fm_open_sel(void)
+{
+    if (G.fm_sel < 0 || G.fm_sel >= G.fm_count) return;
+    char *name = G.fm_names[G.fm_sel];
+    size_t nl = str_len(name);
+    if (nl > 0 && name[nl - 1] == '/') {
+        char path[FS_PATH_MAX];
+        path_join(path, G.fm_cwd, name, 1);
+        if (fs_chdir(path) == 0) {
+            fm_refresh();
+            G.fm_sel = 0;
+        }
+    } else {
+        char path[FS_PATH_MAX];
+        path_join(path, G.fm_cwd, name, 0);
+        int n = fs_read(path, G.note_buf, NOTE_BUF - 1);
+        if (n < 0) n = 0;
+        G.note_buf[n] = '\0';
+        G.note_len = n;
+        G.note_cursor = 0;
+        str_cpy(G.note_path, path, sizeof(G.note_path));
+        stack_push(APP_NOTEPAD);
+    }
+}
+
+static void calc_reset(void)
+{
+    G.calc_disp[0] = '0';
+    G.calc_disp[1] = '\0';
+    G.calc_entry[0] = '\0';
+    G.calc_op = 0;
+    G.calc_acc = 0;
+    G.calc_have_acc = 0;
+}
+
+static long long calc_parse_int(void)
+{
+    long long v = 0;
+    int neg = 0;
+    const char *p = G.calc_disp;
+    if (*p == '-') { neg = 1; p++; }
+    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    return neg ? -v : v;
+}
+
+static void calc_fmt_ll(long long v)
+{
+    int n = 0;
+    char tmp[24];
+    int i = 0;
+    if (v == 0) { G.calc_disp[n++] = '0'; G.calc_disp[n] = '\0'; return; }
+    int neg = v < 0;
+    unsigned long long u = (unsigned long long)(neg ? -v : v);
+    while (u) { tmp[i++] = (char)('0' + (u % 10)); u /= 10; }
+    if (neg) G.calc_disp[n++] = '-';
+    while (i > 0) G.calc_disp[n++] = tmp[--i];
+    G.calc_disp[n] = '\0';
+}
+
+static void calc_apply(void)
+{
+    long long v = calc_parse_int();
+    if (!G.calc_have_acc) {
+        G.calc_acc = v;
+        G.calc_have_acc = 1;
+        return;
+    }
+    if (G.calc_op == 0) {
+        G.calc_acc = v;
+        calc_fmt_ll(G.calc_acc);
+        return;
+    }
+    if (G.calc_op == '+') G.calc_acc += v;
+    else if (G.calc_op == '-') G.calc_acc -= v;
+    else if (G.calc_op == '*') G.calc_acc *= v;
+    else if (G.calc_op == '/') {
+        if (v != 0) G.calc_acc /= v;
+    }
+    calc_fmt_ll(G.calc_acc);
+}
+
+static void snake_reset(void)
+{
+    G.snake_len = 3;
+    G.snake_x[0] = 8; G.snake_y[0] = 6;
+    G.snake_x[1] = 7; G.snake_y[1] = 6;
+    G.snake_x[2] = 6; G.snake_y[2] = 6;
+    G.snake_dir = 1;
+    G.snake_fx = 12;
+    G.snake_fy = 6;
+    G.snake_next_tick = timer_get_ms() + 220;
+    G.snake_alive = 1;
+}
+
+static void snake_tick(uint8_t *fb, int gx, int gy)
+{
+    if (!G.snake_alive) return;
+    uint32_t now = timer_get_ms();
+    if ((int32_t)(now - G.snake_next_tick) < 0) return;
+    G.snake_next_tick = now + 220;
+    int dx = 0, dy = 0;
+    if (G.snake_dir == 0) { dy = -1; }
+    if (G.snake_dir == 1) { dx = 1; }
+    if (G.snake_dir == 2) { dy = 1; }
+    if (G.snake_dir == 3) { dx = -1; }
+    int nx = G.snake_x[0] + dx;
+    int ny = G.snake_y[0] + dy;
+    if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) { G.snake_alive = 0; return; }
+    for (int i = 0; i < G.snake_len; i++)
+        if (G.snake_x[i] == nx && G.snake_y[i] == ny) { G.snake_alive = 0; return; }
+    for (int i = G.snake_len; i > 0; i--) {
+        G.snake_x[i] = G.snake_x[i - 1];
+        G.snake_y[i] = G.snake_y[i - 1];
+    }
+    G.snake_x[0] = nx;
+    G.snake_y[0] = ny;
+    if (nx == G.snake_fx && ny == G.snake_fy) {
+        if (G.snake_len < SNAKE_MAX - 1) G.snake_len++;
+        G.snake_fx = (G.snake_fx + 7) % GRID_W;
+        G.snake_fy = (G.snake_fy + 3) % GRID_H;
+    }
+    (void)fb;
+    (void)gx;
+    (void)gy;
+}
+
+static void snake_draw(uint8_t *fb, int gx, int gy)
+{
+    gui_draw_fill_rect(fb, gx, gy, GRID_W * CELL, GRID_H * CELL, GUI_C_BLACK);
+    for (int y = 0; y < GRID_H; y++)
+        for (int x = 0; x < GRID_W; x++)
+            gui_draw_fill_rect(fb, gx + x * CELL, gy + y * CELL, CELL - 1, CELL - 1, GUI_C_DKGRAY);
+    if (G.snake_alive) {
+        gui_draw_fill_rect(fb, gx + G.snake_fx * CELL, gy + G.snake_fy * CELL, CELL - 1, CELL - 1, GUI_C_BR_RED);
+        for (int i = 0; i < G.snake_len; i++)
+            gui_draw_fill_rect(fb, gx + G.snake_x[i] * CELL, gy + G.snake_y[i] * CELL, CELL - 1, CELL - 1,
+                               i == 0 ? GUI_C_BR_GREEN : GUI_C_GREEN);
+    } else
+        gui_draw_text(fb, gx + 20, gy + GRID_H * CELL / 2 - 4, "GAME OVER", GUI_C_BR_RED, GUI_C_BLACK);
+    gui_draw_text(fb, gx, gy + GRID_H * CELL + 2, "WASD move  R restart", GUI_C_BLACK, GUI_C_LTGRAY);
+}
+
+static void fmt_uint(char *buf, uint32_t v)
+{
+    int i = 0;
+    char t[12];
+    int n = 0;
+    if (v == 0) t[n++] = '0';
+    while (v) { t[n++] = (char)('0' + (v % 10)); v /= 10; }
+    while (n > 0) buf[i++] = t[--n];
+    buf[i] = '\0';
+}
+
+#define NOTE_COLS 32
+#define NOTE_ROWS 10
+
+static void note_index_to_rc(int index, int *pr, int *pc)
+{
+    int r = 0, c = 0;
+    for (int i = 0; i < index && i < G.note_len; i++) {
+        char ch = G.note_buf[i];
+        if (ch == '\n') {
+            r++;
+            c = 0;
+        } else {
+            c++;
+            if (c >= NOTE_COLS) {
+                r++;
+                c = 0;
+            }
+        }
+    }
+    *pr = r;
+    *pc = c;
+}
+
+static void win_offset(int z, int *wx, int *wy)
+{
+    *wx = 12 + z * 10;
+    *wy = 16 + z * 8;
+}
+
+static void draw_desktop(uint8_t *fb)
+{
+    gui_draw_fill_rect(fb, 0, 0, GUI_FB_W, GUI_FB_H, GUI_C_BR_BLUE);
+    gui_draw_fill_rect(fb, 0, GUI_FB_H - 14, GUI_FB_W, 14, GUI_C_DKGRAY);
+    gui_draw_text(fb, 4, GUI_FB_H - 12, "ESC close/quit  ` Program Mgr", GUI_C_WHITE, GUI_C_DKGRAY);
+
+    for (int z = 0; z < stack_n; z++) {
+        AppId app = stack[z];
+        int depth = z;
+        int wx = 12 + depth * 10;
+        int wy = 16 + depth * 8;
+        bool top = (z == stack_n - 1);
+
+        if (app == APP_PROGRAM_MANAGER) {
+            int ww = 220, wh = 130;
+            gui_draw_window(fb, wx, wy, ww, wh, "Program Manager", top);
+            const char *items[] = { "File Manager", "Calculator", "Notepad", "Clock", "Snake" };
+            for (int i = 0; i < 5; i++) {
+                int bx = wx + 8, by = wy + 18 + i * 20, bw = ww - 16, bh = 16;
+                gui_draw_button(fb, bx, by, bw, bh, items[i], false, G.pm_sel == i && top);
+            }
+        } else if (app == APP_FILE_MANAGER) {
+            int ww = 260, wh = 140;
+            gui_draw_window(fb, wx, wy, ww, wh, "File Manager", top);
+            gui_draw_text(fb, wx + 6, wy + 18, "PATH:", GUI_C_BLACK, GUI_C_LTGRAY);
+            gui_draw_text_len(fb, wx + 50, wy + 18, G.fm_cwd, (int)str_len(G.fm_cwd), GUI_C_BLACK, GUI_C_LTGRAY);
+            gui_draw_text(fb, wx + 6, wy + 30, "U=up ENT=open TAB=sel", GUI_C_DKGRAY, GUI_C_LTGRAY);
+            int row = 0;
+            for (int i = 0; i < G.fm_count && row < 8; i++) {
+                uint8_t bg = (i == G.fm_sel && top) ? GUI_C_BR_CYAN : GUI_C_LTGRAY;
+                gui_draw_text_len(fb, wx + 8, wy + 44 + row * 10, G.fm_names[i], (int)str_len(G.fm_names[i]), GUI_C_BLACK, bg);
+                row++;
+            }
+        } else if (app == APP_CALCULATOR) {
+            int ww = 200, wh = 118;
+            gui_draw_window(fb, wx, wy, ww, wh, "Calculator", top);
+            gui_draw_fill_rect(fb, wx + 6, wy + 18, ww - 12, 14, GUI_C_BLACK);
+            gui_draw_text(fb, wx + 8, wy + 20, G.calc_disp, GUI_C_BR_GREEN, GUI_C_BLACK);
+            const char *keys[] = { "7","8","9","/","4","5","6","*","1","2","3","-","0",".","=","+","C" };
+            int kw = 36, kh = 14;
+            for (int r = 0; r < 4; r++)
+                for (int c = 0; c < 4; c++) {
+                    int idx = r * 4 + c;
+                    if (idx < 16)
+                        gui_draw_button(fb, wx + 8 + c * 46, wy + 36 + r * 16, kw, kh, keys[idx], false, false);
+                }
+            gui_draw_button(fb, wx + 8, wy + 36 + 4 * 16, 80, kh, "C", false, false);
+        } else if (app == APP_NOTEPAD) {
+            int ww = 280, wh = 150;
+            gui_draw_window(fb, wx, wy, ww, wh, "Notepad", top);
+            gui_draw_text(fb, wx + 6, wy + 18, G.note_path, GUI_C_BLACK, GUI_C_LTGRAY);
+            {
+                int idx = 0, r = 0, c = 0;
+                while (idx < G.note_len && r < NOTE_ROWS) {
+                    char ch = G.note_buf[idx];
+                    if (ch == '\n') {
+                        r++;
+                        c = 0;
+                        idx++;
+                        continue;
+                    }
+                    if (c >= NOTE_COLS) {
+                        r++;
+                        c = 0;
+                        continue;
+                    }
+                    int py = wy + 30 + r * 8;
+                    uint8_t bg = GUI_C_WHITE;
+                    gui_draw_fill_rect(fb, wx + 8 + c * 8, py, 8, 8, bg);
+                    char one[2] = { ch, '\0' };
+                    gui_draw_text(fb, wx + 8 + c * 8, py, one, GUI_C_BLACK, bg);
+                    idx++;
+                    c++;
+                }
+                int cr, cc;
+                note_index_to_rc(G.note_cursor, &cr, &cc);
+                if (cr < NOTE_ROWS && top)
+                    gui_draw_fill_rect(fb, wx + 8 + cc * 8, wy + 30 + cr * 8, 8, 8, GUI_C_YELLOW);
+            }
+            gui_draw_text(fb, wx + 6, wy + wh - 20, "^S save", GUI_C_DKGRAY, GUI_C_LTGRAY);
+        } else if (app == APP_CLOCK) {
+            int ww = 240, wh = 130;
+            gui_draw_window(fb, wx, wy, ww, wh, "Clock", top);
+            uint32_t now = timer_get_ms();
+            char line[48];
+            if (G.clk_mode == 0) {
+                uint32_t tot = now / 1000;
+                uint32_t h = (tot / 3600) % 99;
+                uint32_t m = (tot / 60) % 60;
+                uint32_t s = tot % 60;
+                int p = 0;
+                line[p++] = 'T';
+                line[p++] = 'I';
+                line[p++] = 'M';
+                line[p++] = 'E';
+                line[p++] = ' ';
+                fmt_uint(line + p, h);
+                p += (int)str_len(line + p);
+                line[p++] = ':';
+                if (m < 10) line[p++] = '0';
+                fmt_uint(line + p, m);
+                p += (int)str_len(line + p);
+                line[p++] = ':';
+                if (s < 10) line[p++] = '0';
+                fmt_uint(line + p, s);
+                p += (int)str_len(line + p);
+                line[p] = '\0';
+                gui_draw_text(fb, wx + 8, wy + 22, "Session clock (from boot)", GUI_C_BLACK, GUI_C_LTGRAY);
+                gui_draw_text(fb, wx + 8, wy + 40, line, GUI_C_BLACK, GUI_C_LTGRAY);
+            } else if (G.clk_mode == 1) {
+                uint32_t el = G.clk_sw_running ? (now - G.clk_sw_start + G.clk_sw_acc) : G.clk_sw_acc;
+                gui_draw_text(fb, wx + 8, wy + 22, "Stopwatch", GUI_C_BLACK, GUI_C_LTGRAY);
+                fmt_uint(line, el);
+                gui_draw_text(fb, wx + 8, wy + 38, line, GUI_C_BLACK, GUI_C_LTGRAY);
+                gui_draw_text(fb, wx + 8, wy + 50, "ms", GUI_C_BLACK, GUI_C_LTGRAY);
+                gui_draw_text(fb, wx + 8, wy + 68, "S start/stop  R reset", GUI_C_DKGRAY, GUI_C_LTGRAY);
+            } else if (G.clk_mode == 2) {
+                gui_draw_text(fb, wx + 8, wy + 22, "Timer (sec)", GUI_C_BLACK, GUI_C_LTGRAY);
+                gui_draw_text(fb, wx + 8, wy + 36, G.clk_digits, GUI_C_BLACK, GUI_C_LTGRAY);
+                if (G.clk_timer_active) {
+                    int32_t left = (int32_t)(G.clk_timer_deadline - now);
+                    if (left < 0) left = 0;
+                    fmt_uint(line, (uint32_t)(left / 1000));
+                    gui_draw_text(fb, wx + 8, wy + 52, line, GUI_C_BR_RED, GUI_C_LTGRAY);
+                    if (left == 0) gui_draw_text(fb, wx + 8, wy + 66, "DONE", GUI_C_BR_RED, GUI_C_LTGRAY);
+                }
+                gui_draw_text(fb, wx + 8, wy + 88, "0-9 type  ENT=start", GUI_C_DKGRAY, GUI_C_LTGRAY);
+            } else {
+                gui_draw_text(fb, wx + 8, wy + 22, "Alarm (sec from now)", GUI_C_BLACK, GUI_C_LTGRAY);
+                gui_draw_text(fb, wx + 8, wy + 36, G.clk_digits, GUI_C_BLACK, GUI_C_LTGRAY);
+                if (G.clk_alarm_armed) {
+                    int32_t left = (int32_t)(G.clk_alarm_at - now);
+                    if (left <= 0) {
+                        int flash = (int)((now / 400) % 2);
+                        if (flash)
+                            gui_draw_fill_rect(fb, wx + 4, wy + 50, ww - 8, 20, GUI_C_BR_RED);
+                        gui_draw_text(fb, wx + 8, wy + 54, "ALARM!", GUI_C_WHITE, flash ? GUI_C_BR_RED : GUI_C_LTGRAY);
+                    } else {
+                        fmt_uint(line, (uint32_t)(left / 1000));
+                        gui_draw_text(fb, wx + 8, wy + 54, line, GUI_C_BLACK, GUI_C_LTGRAY);
+                    }
+                }
+                gui_draw_text(fb, wx + 8, wy + 88, "ENT=arm  0-9", GUI_C_DKGRAY, GUI_C_LTGRAY);
+            }
+            gui_draw_text(fb, wx + 8, wy + wh - 18, "1=clk 2=SW 3=TMR 4=ALM", GUI_C_DKGRAY, GUI_C_LTGRAY);
+        } else if (app == APP_SNAKE) {
+            int ww = GRID_W * CELL + 16, wh = GRID_H * CELL + 44;
+            gui_draw_window(fb, wx, wy, ww, wh, "Snake", top);
+            snake_draw(fb, wx + 8, wy + 18);
         }
     }
 }
 
-static void draw_string(uint8_t *fb, int x, int y, const char *s, uint8_t fg, uint8_t bg)
+static void launch_from_pm(int row)
 {
-    while (*s) {
-        draw_char_8x8(fb, x, y, *s++, fg, bg);
-        x += 8;
+    if (row < 0 || row > 4) return;
+    G.pm_sel = row;
+    if (row == 0) {
+        fm_refresh();
+        stack_push(APP_FILE_MANAGER);
+    } else if (row == 1) {
+        calc_reset();
+        stack_push(APP_CALCULATOR);
+    } else if (row == 2) {
+        if (!G.note_path[0]) {
+            G.note_buf[0] = '\0';
+            G.note_len = 0;
+            G.note_cursor = 0;
+            str_cpy(G.note_path, "/NOTE.TXT", sizeof(G.note_path));
+        }
+        stack_push(APP_NOTEPAD);
+    } else if (row == 3) {
+        G.clk_mode = 0;
+        G.clk_digit_len = 0;
+        G.clk_digits[0] = '\0';
+        stack_push(APP_CLOCK);
+    } else {
+        snake_reset();
+        stack_push(APP_SNAKE);
+    }
+}
+
+static int calc_key_char(char key)
+{
+    if (key >= '0' && key <= '9') {
+        size_t n = str_len(G.calc_disp);
+        if (n + 1 < sizeof(G.calc_disp)) {
+            if (n == 1 && G.calc_disp[0] == '0') {
+                G.calc_disp[0] = key;
+                G.calc_disp[1] = 0;
+            } else {
+                G.calc_disp[n++] = key;
+                G.calc_disp[n] = 0;
+            }
+        }
+        return 0;
+    }
+    if (key == '.') return 0;
+    if (key == 'c' || key == 'C') {
+        calc_reset();
+        return 0;
+    }
+    if (key == '+' || key == '-' || key == '*' || key == '/') {
+        calc_apply();
+        G.calc_op = key;
+        G.calc_disp[0] = '0';
+        G.calc_disp[1] = 0;
+        return 0;
+    }
+    if (key == '=' || key == '\n') {
+        calc_apply();
+        G.calc_op = 0;
+        return 0;
+    }
+    return 0;
+}
+
+static void clk_digits_append(char d)
+{
+    if (G.clk_digit_len < (int)sizeof(G.clk_digits) - 1) {
+        G.clk_digits[G.clk_digit_len++] = d;
+        G.clk_digits[G.clk_digit_len] = '\0';
+    }
+}
+
+static int handle_key(char c)
+{
+    if (c == 27) {
+        if (stack_n <= 1)
+            return 1;
+        stack_pop();
+        return 0;
+    }
+    if (c == '`') {
+        stack_n = 0;
+        stack_push(APP_PROGRAM_MANAGER);
+        G.pm_sel = 0;
+        return 0;
+    }
+
+    AppId t = stack_top();
+    if (t == APP_FILE_MANAGER) {
+        if (c == '\t') {
+            if (G.fm_count > 0)
+                G.fm_sel = (G.fm_sel + 1) % G.fm_count;
+            return 0;
+        }
+        if (c == 'u' || c == 'U') {
+            fm_parent();
+            return 0;
+        }
+        if (c == '\n' || c == '\r') {
+            fm_open_sel();
+            return 0;
+        }
+        return 0;
+    }
+    if (t == APP_CALCULATOR) {
+        calc_key_char(c);
+        return 0;
+    }
+    if (t == APP_NOTEPAD) {
+        if (c == 19) {
+            if (G.note_path[0]) {
+                if (!fs_exists(G.note_path))
+                    fs_create(G.note_path);
+                fs_write(G.note_path, G.note_buf, (size_t)G.note_len);
+            }
+            return 0;
+        }
+        if (c == '\b') {
+            if (G.note_cursor > 0 && G.note_len > 0) {
+                for (int i = G.note_cursor - 1; i < G.note_len; i++)
+                    G.note_buf[i] = G.note_buf[i + 1];
+                G.note_len--;
+                G.note_cursor--;
+                G.note_buf[G.note_len] = '\0';
+            }
+            return 0;
+        }
+        if (c == '\n' || c == '\r') {
+            if (G.note_len + 1 < NOTE_BUF) {
+                for (int i = G.note_len; i > G.note_cursor; i--)
+                    G.note_buf[i] = G.note_buf[i - 1];
+                G.note_buf[G.note_cursor] = '\n';
+                G.note_len++;
+                G.note_cursor++;
+            }
+            return 0;
+        }
+        if (c >= 32 && c < 127 && G.note_len + 1 < NOTE_BUF) {
+            for (int i = G.note_len; i > G.note_cursor; i--)
+                G.note_buf[i] = G.note_buf[i - 1];
+            G.note_buf[G.note_cursor] = c;
+            G.note_len++;
+            G.note_cursor++;
+            G.note_buf[G.note_len] = '\0';
+        }
+        return 0;
+    }
+    if (t == APP_CLOCK) {
+        if (c == '1') {
+            G.clk_mode = 0;
+            return 0;
+        }
+        if (c == '2') {
+            G.clk_mode = 1;
+            return 0;
+        }
+        if (c == '3') {
+            G.clk_mode = 2;
+            G.clk_timer_active = 0;
+            G.clk_digit_len = 0;
+            G.clk_digits[0] = 0;
+            return 0;
+        }
+        if (c == '4') {
+            G.clk_mode = 3;
+            G.clk_alarm_armed = 0;
+            G.clk_digit_len = 0;
+            G.clk_digits[0] = 0;
+            return 0;
+        }
+        if (G.clk_mode == 1) {
+            if (c == 's' || c == 'S') {
+                uint32_t now = timer_get_ms();
+                if (G.clk_sw_running) {
+                    G.clk_sw_acc += now - G.clk_sw_start;
+                    G.clk_sw_running = 0;
+                } else {
+                    G.clk_sw_start = now;
+                    G.clk_sw_running = 1;
+                }
+            }
+            if (c == 'r' || c == 'R') {
+                G.clk_sw_acc = 0;
+                G.clk_sw_running = 0;
+            }
+            return 0;
+        }
+        if (G.clk_mode == 2) {
+            if (c >= '0' && c <= '9')
+                clk_digits_append(c);
+            if (c == '\b' && G.clk_digit_len > 0) {
+                G.clk_digit_len--;
+                G.clk_digits[G.clk_digit_len] = 0;
+            }
+            if (c == '\n' || c == '\r') {
+                uint32_t sec = 0;
+                for (int i = 0; G.clk_digits[i]; i++)
+                    sec = sec * 10 + (uint32_t)(G.clk_digits[i] - '0');
+                G.clk_timer_deadline = timer_get_ms() + sec * 1000;
+                G.clk_timer_active = 1;
+            }
+            return 0;
+        }
+        if (G.clk_mode == 3) {
+            if (c >= '0' && c <= '9')
+                clk_digits_append(c);
+            if (c == '\b' && G.clk_digit_len > 0) {
+                G.clk_digit_len--;
+                G.clk_digits[G.clk_digit_len] = 0;
+            }
+            if (c == '\n' || c == '\r') {
+                uint32_t sec = 0;
+                for (int i = 0; G.clk_digits[i]; i++)
+                    sec = sec * 10 + (uint32_t)(G.clk_digits[i] - '0');
+                G.clk_alarm_at = timer_get_ms() + sec * 1000;
+                G.clk_alarm_armed = 1;
+            }
+            return 0;
+        }
+        return 0;
+    }
+    if (t == APP_SNAKE) {
+        if (c == 'r' || c == 'R') {
+            snake_reset();
+            return 0;
+        }
+        if (c == 'w' || c == 'W')
+            G.snake_dir = 0;
+        else if (c == 'd' || c == 'D')
+            G.snake_dir = 1;
+        else if (c == 's' || c == 'S')
+            G.snake_dir = 2;
+        else if (c == 'a' || c == 'A')
+            G.snake_dir = 3;
+        return 0;
+    }
+    if (t == APP_PROGRAM_MANAGER) {
+        if (c >= '1' && c <= '5')
+            launch_from_pm((int)(c - '1'));
+        return 0;
+    }
+    return 0;
+}
+
+static void handle_mouse_click(int px, int py)
+{
+    int z = stack_n - 1;
+    if (z < 0) return;
+    int wx, wy;
+    win_offset(z, &wx, &wy);
+    AppId t = stack[z];
+
+    if (t == APP_PROGRAM_MANAGER) {
+        int ww = 220, wh = 130;
+        if (!gui_draw_hit(px, py, wx, wy, ww, wh)) return;
+        if (!gui_draw_hit(px, py, wx + 8, wy + 18, ww - 16, 100)) return;
+        int rel = py - (wy + 18);
+        if (rel < 0) return;
+        int row = rel / 20;
+        if (row < 0 || row >= 5) return;
+        launch_from_pm(row);
+        return;
+    }
+    if (t == APP_CALCULATOR) {
+        const char *keys = "789/456*123-0.=+";
+        int kw = 36, kh = 14;
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++) {
+                int bx = wx + 8 + c * 46;
+                int by = wy + 36 + r * 16;
+                if (gui_draw_hit(px, py, bx, by, kw, kh)) {
+                    char k[2] = { keys[r * 4 + c], 0 };
+                    calc_key_char(k[0]);
+                    return;
+                }
+            }
+        if (gui_draw_hit(px, py, wx + 8, wy + 36 + 4 * 16, 80, kh))
+            calc_key_char('C');
+        return;
     }
 }
 
 void gui_run(void)
 {
     video_mode13_enter();
+    mouse_init();
+    mx = 160;
+    my = 100;
+    prev_btn = 0;
+    stack_n = 0;
+    stack_push(APP_PROGRAM_MANAGER);
+    G.pm_sel = 0;
+    fm_refresh();
+    calc_reset();
+    G.note_buf[0] = '\0';
+    G.note_len = 0;
+    G.note_cursor = 0;
+    G.note_path[0] = '\0';
+    G.clk_mode = 0;
+    G.clk_sw_running = 0;
+    G.clk_sw_acc = 0;
+    G.clk_timer_active = 0;
+    G.clk_digit_len = 0;
+    G.clk_digits[0] = '\0';
+    G.clk_alarm_armed = 0;
+    snake_reset();
+
     uint8_t *fb = video_mode13_framebuffer();
-    video_mode13_set_palette(gui_palette);
+    gui_draw_apply_palette();
 
-    /* Desktop: blue background */
-    fill_rect(fb, 0, 0, W, H, C_BLUE);
-
-    /* Main window: chunky 1980s style (thick 3D border) */
-    int win_x = 24;
-    int win_y = 20;
-    int win_w = 272;
-    int win_h = 120;
-    int border = 4;
-
-    /* Outer shadow (dark) */
-    fill_rect(fb, win_x + border, win_y + border, win_w, win_h, C_DKGRAY);
-    /* Inner window fill */
-    fill_rect(fb, win_x, win_y, win_w, win_h, C_LTGRAY);
-    /* Top/left highlight (white) */
-    fill_rect(fb, win_x, win_y, win_w, 2, C_WHITE);
-    fill_rect(fb, win_x, win_y, 2, win_h, C_WHITE);
-    /* Bottom/right shadow (dark gray) */
-    fill_rect(fb, win_x, win_y + win_h - 2, win_w, 2, C_DKGRAY);
-    fill_rect(fb, win_x + win_w - 2, win_y, 2, win_h, C_DKGRAY);
-    /* Title bar: inverse (white on blue) */
-    fill_rect(fb, win_x + 2, win_y + 2, win_w - 4, 14, C_BR_BLUE);
-    draw_string(fb, win_x + 8, win_y + 5, " BonfireOS GUI ", C_WHITE, C_BR_BLUE);
-    /* Inner content area */
-    fill_rect(fb, win_x + 4, win_y + 20, win_w - 8, win_h - 24, C_LTGRAY);
-    draw_string(fb, win_x + 12, win_y + 36, "Press any key to return to CLI", C_BLACK, C_LTGRAY);
-    draw_string(fb, win_x + 12, win_y + 52, "Welcome to the 1980s.", C_BLUE, C_LTGRAY);
-
-    /* Small decorative stripe at bottom (CGA style) */
-    fill_rect(fb, 0, H - 12, W, 12, C_BR_BLUE);
-    draw_string(fb, 8, H - 10, "BonfireOS (c) 1985  [gui]", C_WHITE, C_BR_BLUE);
-
-    /* Event loop: exit on any key */
     for (;;) {
-        char c = keyboard_getchar();
-        if (c)
-            break;
-        __asm__ volatile ("hlt");
-    }
+        if (stack_top() == APP_SNAKE)
+            snake_tick(fb, 0, 0);
 
-    video_mode13_leave();
+        int dx, dy, btn;
+        mouse_poll(&dx, &dy, &btn);
+        mx += dx;
+        my += dy;
+        if (mx < 0) mx = 0;
+        if (mx >= GUI_FB_W) mx = GUI_FB_W - 1;
+        if (my < 0) my = 0;
+        if (my >= GUI_FB_H) my = GUI_FB_H - 1;
+
+        char key;
+        while ((key = keyboard_getchar()) != 0) {
+            if (handle_key(key)) {
+                video_mode13_leave();
+                return;
+            }
+        }
+
+        if ((btn & MOUSE_BTN_LEFT) && !(prev_btn & MOUSE_BTN_LEFT))
+            handle_mouse_click(mx, my);
+        prev_btn = btn;
+
+        draw_desktop(fb);
+        __asm__ volatile("hlt");
+    }
 }
+</think>
+Fixing errors in `gui.c`: correcting hit-testing, notepad rendering, and removing the invalid function.
+
+<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
+Read

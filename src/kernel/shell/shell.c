@@ -16,6 +16,10 @@
 #if ENABLE_GUI
 #include <kernel/gui.h>
 #endif
+#if ENABLE_NET
+#include <kernel/net.h>
+#include <kernel/lynx_host.h>
+#endif
 
 #define LINE_MAX 256
 
@@ -37,6 +41,9 @@ static void cmd_help(void)
     vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM REDALERT");
 #if ENABLE_GUI
     vga_puts(" gui");
+#endif
+#if ENABLE_NET
+    vga_puts(" ping httpget LYNX");
 #endif
     vga_puts("\n");
 }
@@ -204,6 +211,53 @@ static void cmd_gui(const char *args)
 }
 #endif
 
+#if ENABLE_NET
+static void cmd_ping(const char *args)
+{
+    (void)args;
+    if (net_ping(NET_IPV4_LOOPBACK) == 0)
+        vga_puts("ping 127.0.0.1: ok\n");
+    else
+        vga_puts("ping 127.0.0.1: no reply\n");
+}
+
+static void cmd_httpget(const char *args)
+{
+    (void)args;
+    static char buf[4096];
+    int n = net_http_get_loopback(buf, sizeof(buf));
+    if (n < 0)
+        vga_puts("httpget: failed\n");
+    else {
+        vga_puts(buf);
+        vga_putchar('\n');
+    }
+}
+
+static void cmd_lynx(const char *args)
+{
+    char *argv[4];
+    int argc = 1;
+    argv[0] = "LYNX";
+    argv[1] = NULL;
+    const char *p = args;
+    skip_spaces(&p);
+    if (*p) {
+        static char url[128];
+        size_t i = 0;
+        while (p[i] && i < sizeof(url) - 1) {
+            url[i] = p[i];
+            i++;
+        }
+        url[i] = '\0';
+        argv[1] = url;
+        argv[2] = NULL;
+        argc = 2;
+    }
+    lynx_main(argc, argv);
+}
+#endif
+
 static void run_command(char *line)
 {
     alias_parse_and_expand(line, expanded_buf, sizeof(expanded_buf));
@@ -228,6 +282,15 @@ static void run_command(char *line)
     if (cmd[0] == 'g' && cmd[1] == 'u' && cmd[2] == 'i' && !cmd[3]) { cmd_gui(p); return; }
 #else
     if (cmd[0] == 'g' && cmd[1] == 'u' && cmd[2] == 'i' && !cmd[3]) { vga_puts("The OS was built without a GUI.\n"); return; }
+#endif
+#if ENABLE_NET
+    if (cmd[0] == 'p' && cmd[1] == 'i' && cmd[2] == 'n' && cmd[3] == 'g' && !cmd[4]) { cmd_ping(p); return; }
+    if (cmd[0] == 'h' && cmd[1] == 't' && cmd[2] == 't' && cmd[3] == 'p' && cmd[4] == 'g' && cmd[5] == 'e' && cmd[6] == 't' && !cmd[7]) { cmd_httpget(p); return; }
+    if (cmd[0] == 'L' && cmd[1] == 'Y' && cmd[2] == 'N' && cmd[3] == 'X' && !cmd[4]) { cmd_lynx(p); return; }
+#else
+    if (cmd[0] == 'p' && cmd[1] == 'i' && cmd[2] == 'n' && cmd[3] == 'g' && !cmd[4]) { vga_puts("The OS was built without the network stack.\n"); return; }
+    if (cmd[0] == 'h' && cmd[1] == 't' && cmd[2] == 't' && cmd[3] == 'p' && cmd[4] == 'g' && cmd[5] == 'e' && cmd[6] == 't' && !cmd[7]) { vga_puts("The OS was built without the network stack.\n"); return; }
+    if (cmd[0] == 'L' && cmd[1] == 'Y' && cmd[2] == 'N' && cmd[3] == 'X' && !cmd[4]) { vga_puts("The OS was built without the network stack.\n"); return; }
 #endif
     vga_puts("Unknown command. Type 'help' for list.\n");
 }

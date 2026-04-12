@@ -47,9 +47,9 @@ struct fat_dir_entry {
 #define FAT_ENTRY_EOC16    0xFFF8
 #define FAT_ENTRY_BAD      0x0FF7
 
-/* Mount disk (read BPB from LBA 0). Returns 0 on success. */
+/* Mount disk (read BPB / exFAT VBR from LBA 0). Tries FAT12/16 then exFAT. Returns 0 on success. */
 int fat_mount(void);
-/* Find file in root by name (e.g. "FILE    TXT"). *out_cluster, *out_size set. Returns 0 if found. */
+/* Find file in root by name (e.g. "FILE    TXT"). FAT: 8.3 match; exFAT: same tokenization vs UTF-16 name). */
 int fat_find_root(const char *name_8_3, uint32_t *out_cluster, uint32_t *out_size);
 /* Read file content: start at cluster, follow FAT chain, fill buf (max size bytes). Returns bytes read. */
 int fat_read_file(uint32_t start_cluster, uint32_t size, void *buf);

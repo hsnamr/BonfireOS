@@ -16,6 +16,9 @@
 #include <kernel/timer.h>
 #include <kernel/mm.h>
 #include <kernel/fat.h>
+#if ENABLE_NET
+#include <kernel/net.h>
+#endif
 
 #define MULTIBOOT_FLAG_MEM   (1 << 0)
 #define HEAP_SIZE            (256 * 1024)
@@ -57,7 +60,11 @@ void kernel_main(uint32_t magic, uint32_t multiboot_info_phys)
     process_create(shell_run);
     timer_init(100);
     if (fat_mount() == 0)
-        vga_puts("FAT filesystem mounted.\n");
+        vga_puts("FAT or exFAT filesystem mounted.\n");
+#if ENABLE_NET
+    net_init();
+    vga_puts("Network stack (loopback) initialized.\n");
+#endif
     __asm__ volatile ("sti");
 
     vga_puts("\n> ");

@@ -11,11 +11,13 @@ GRUB_MKRESCUE := grub-mkrescue
 
 # Optional GUI (1980s-style). Set ENABLE_GUI=0 to build without GUI.
 ENABLE_GUI ?= 1
+# Optional TCP/IP stack + Lynx-style host. Set ENABLE_NET=0 to omit.
+ENABLE_NET ?= 1
 
 # Flags
 CFLAGS   := -ffreestanding -fno-pie -fno-stack-protector -fno-builtin \
             -m64 -march=x86-64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-            -Wall -Wextra -O2 -g -I include -DENABLE_GUI=$(ENABLE_GUI)
+            -Wall -Wextra -O2 -g -I include -DENABLE_GUI=$(ENABLE_GUI) -DENABLE_NET=$(ENABLE_NET)
 ASFLAGS  := -f elf64
 LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T linker.ld
 
@@ -29,12 +31,19 @@ GRUB_CFG := scripts/grub.cfg
 
 # Kernel objects (C and ASM) — mirror src/ under build/obj/
 # When ENABLE_GUI=0, exclude GUI sources so the kernel builds without GUI.
+# When ENABLE_NET=0, exclude net/ and lynx_host/.
 C_SRCS_ALL := $(shell find src -name '*.c')
 GUI_SRCS   := $(wildcard src/kernel/gui/*.c)
+NET_SRCS   := $(wildcard src/kernel/net/*.c)
+LYNX_SRCS  := $(wildcard src/kernel/lynx_host/*.c)
 ifeq ($(ENABLE_GUI),0)
 C_SRCS     := $(filter-out $(GUI_SRCS),$(C_SRCS_ALL))
 else
 C_SRCS     := $(C_SRCS_ALL)
+endif
+ifeq ($(ENABLE_NET),0)
+C_SRCS     := $(filter-out $(NET_SRCS),$(C_SRCS))
+C_SRCS     := $(filter-out $(LYNX_SRCS),$(C_SRCS))
 endif
 ASM_SRCS   := $(shell find src -name '*.asm' -o -name '*.s')
 C_OBJS   := $(patsubst src/%.c,$(OBJ)/%.o,$(C_SRCS))
@@ -46,13 +55,17 @@ OBJS     := $(C_OBJS) $(ASM_OBJS)
 KERNEL_BIN := $(BUILD)/kernel.bin
 ISO_IMG    := $(BUILD)/bonfireos.iso
 
-.PHONY: all clean run iso dirs no-gui
+.PHONY: all clean run iso dirs no-gui no-net
 
 all: dirs $(KERNEL_BIN)
 
 # Build without the optional GUI (CLI-only kernel).
 no-gui:
 	$(MAKE) all ENABLE_GUI=0
+
+# Build without TCP/IP and Lynx host.
+no-net:
+	$(MAKE) all ENABLE_NET=0
 
 dirs:
 	@mkdir -p $(BOOT) $(OBJ) $(shell dirname $(C_OBJS)) $(shell dirname $(ASM_OBJS))
