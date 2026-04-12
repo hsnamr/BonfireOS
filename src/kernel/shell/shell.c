@@ -38,7 +38,7 @@ static void next_arg(const char **p, char *buf, size_t max_len)
 
 static void cmd_help(void)
 {
-    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat DOOM REDALERT");
+    vga_puts("Commands: help clear echo ls cd mkdir cat edit alias fatcat fatput DOOM REDALERT");
 #if ENABLE_GUI
     vga_puts(" gui");
 #endif
@@ -134,6 +134,30 @@ static void cmd_fatcat(const char *args)
     if (n > 0) {
         for (int k = 0; k < n; k++) vga_putchar(buf[k]);
         if (n > 0 && buf[n-1] != '\n') vga_putchar('\n');
+    }
+}
+
+/* Write file to FAT/exFAT root (8.3 name); remaining line is content (no newline added). */
+static void cmd_fatput(const char *args)
+{
+    char name[12];
+    next_arg(&args, name, sizeof(name));
+    if (!name[0]) { vga_puts("fatput: missing filename\n"); return; }
+    char name_83[11];
+    size_t i = 0, j = 0;
+    for (; name[i] && name[i] != '.' && j < 8; i++) name_83[j++] = name[i];
+    while (j < 8) name_83[j++] = ' ';
+    if (name[i] == '.') i++;
+    for (; name[i] && j < 11; i++) name_83[j++] = name[i];
+    while (j < 11) name_83[j++] = ' ';
+    skip_spaces(&args);
+    char wb[FS_FILE_BUF];
+    size_t len = 0;
+    while (*args && len < sizeof(wb) - 1) wb[len++] = *args++;
+    wb[len] = '\0';
+    if (fat_write_root(name_83, wb, (uint32_t)len) != 0) {
+        vga_puts("fatput: write failed\n");
+        return;
     }
 }
 
@@ -276,6 +300,7 @@ static void run_command(char *line)
     if (cmd[0] == 'e' && cmd[1] == 'd' && cmd[2] == 'i' && cmd[3] == 't' && !cmd[4]) { cmd_edit(p); return; }
     if (cmd[0] == 'a' && cmd[1] == 'l' && cmd[2] == 'i' && cmd[3] == 'a' && cmd[4] == 's' && !cmd[5]) { cmd_alias(p); return; }
     if (cmd[0] == 'f' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == 'c' && cmd[4] == 'a' && cmd[5] == 't' && !cmd[6]) { cmd_fatcat(p); return; }
+    if (cmd[0] == 'f' && cmd[1] == 'a' && cmd[2] == 't' && cmd[3] == 'p' && cmd[4] == 'u' && cmd[5] == 't' && !cmd[6]) { cmd_fatput(p); return; }
     if (cmd[0] == 'D' && cmd[1] == 'O' && cmd[2] == 'O' && cmd[3] == 'M' && !cmd[4]) { cmd_doom(p); return; }
     if (cmd[0] == 'R' && cmd[1] == 'E' && cmd[2] == 'D' && cmd[3] == 'A' && cmd[4] == 'L' && cmd[5] == 'E' && cmd[6] == 'R' && cmd[7] == 'T' && !cmd[8]) { cmd_redalert(p); return; }
 #if ENABLE_GUI

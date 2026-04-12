@@ -53,5 +53,7 @@ int fat_mount(void);
 int fat_find_root(const char *name_8_3, uint32_t *out_cluster, uint32_t *out_size);
 /* Read file content: start at cluster, follow FAT chain, fill buf (max size bytes). Returns bytes read. */
 int fat_read_file(uint32_t start_cluster, uint32_t size, void *buf);
+/* Create or replace file in root (8.3 name). Writes size bytes from buf. Returns 0 on success. */
+int fat_write_root(const char *name_8_3, const void *buf, uint32_t size);
 
 #endif /* BONFIRE_FAT_H */

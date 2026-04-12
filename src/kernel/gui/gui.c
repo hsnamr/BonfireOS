@@ -19,6 +19,8 @@ typedef enum {
     APP_NOTEPAD,
     APP_CLOCK,
     APP_SNAKE,
+    APP_PAINT,
+    APP_MINESWEEPER,
 } AppId;
 
 #define MAX_STACK 8
@@ -29,6 +31,16 @@ typedef enum {
 #define GRID_W 20
 #define GRID_H 12
 #define CELL 6
+
+#define PAINT_CW 200
+#define PAINT_CH 88
+#define PAINT_TOOLBAR_H 16
+
+#define MS_COLS 9
+#define MS_ROWS 9
+#define MS_CELLS (MS_COLS * MS_ROWS)
+#define MS_MINES 10
+#define MS_CSZ 14
 
 static AppId stack[MAX_STACK];
 static int stack_n;
@@ -95,7 +107,20 @@ static struct {
     int snake_fx, snake_fy;
     uint32_t snake_next_tick;
     int snake_alive;
+    uint8_t paint_canvas[PAINT_CW * PAINT_CH];
+    uint8_t paint_color;
+    int paint_tool;
+    int paint_lx, paint_ly;
+    int paint_stroke;
+    uint8_t ms_mine[MS_CELLS];
+    uint8_t ms_adj[MS_CELLS];
+    uint8_t ms_vis[MS_CELLS];
+    int ms_started;
+    int ms_dead;
+    int ms_win;
 } G;
+
+static uint32_t ms_rng_state = 0xC0FFEEu;
 
 static void stack_push(AppId a)
 {
@@ -293,6 +318,259 @@ static void snake_draw(uint8_t *fb, int gx, int gy)
     gui_draw_text(fb, gx, gy + GRID_H * CELL + 2, "WASD move  R restart", GUI_C_BLACK, GUI_C_LTGRAY);
 }
 
+static void paint_clear_canvas(void)
+{
+    for (int i = 0; i < PAINT_CW * PAINT_CH; i++)
+        G.paint_canvas[i] = GUI_C_WHITE;
+}
+
+static void paint_init(void)
+{
+    paint_clear_canvas();
+    G.paint_color = GUI_C_BLACK;
+    G.paint_tool = 0;
+    G.paint_stroke = 0;
+}
+
+static void paint_plot(int x, int y, uint8_t c)
+{
+    if (x < 0 || y < 0 || x >= PAINT_CW || y >= PAINT_CH) return;
+    G.paint_canvas[y * PAINT_CW + x] = c;
+}
+
+static int paint_iabs(int x)
+{
+    return x < 0 ? -x : x;
+}
+
+static void paint_line(int x0, int y0, int x1, int y1, uint8_t c)
+{
+    int dx = paint_iabs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = paint_iabs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    for (;;) {
+        paint_plot(x0, y0, c);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x0 += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void paint_handle_mouse(int mx, int my, int btn, int prev_btn)
+{
+    if (stack_top() != APP_PAINT) return;
+    int z = stack_n - 1;
+    int wx = 12 + z * 10;
+    int wy = 16 + z * 8;
+    int ww = 280, wh = 168;
+    if (!gui_draw_hit(mx, my, wx, wy, ww, wh)) {
+        if (!(btn & MOUSE_BTN_LEFT)) G.paint_stroke = 0;
+        return;
+    }
+    int cx0 = wx + 8;
+    int cy0 = wy + 18 + PAINT_TOOLBAR_H;
+    int pal_y = cy0 + PAINT_CH + 4;
+
+    if (btn & MOUSE_BTN_LEFT) {
+        if (gui_draw_hit(mx, my, wx + 8, wy + 18, 44, 14)) {
+            paint_clear_canvas();
+            return;
+        }
+        if (gui_draw_hit(mx, my, wx + 56, wy + 18, 44, 14)) {
+            G.paint_tool = 0;
+            return;
+        }
+        if (gui_draw_hit(mx, my, wx + 104, wy + 18, 44, 14)) {
+            G.paint_tool = 1;
+            return;
+        }
+        for (int i = 0; i < 16; i++) {
+            int px = wx + 8 + i * 16;
+            if (gui_draw_hit(mx, my, px, pal_y, 14, 14)) {
+                G.paint_color = (uint8_t)i;
+                return;
+            }
+        }
+        if (gui_draw_hit(mx, my, cx0, cy0, PAINT_CW, PAINT_CH)) {
+            int cx = mx - cx0;
+            int cy = my - cy0;
+            uint8_t col = (G.paint_tool != 0) ? GUI_C_WHITE : G.paint_color;
+            if ((prev_btn & MOUSE_BTN_LEFT) && G.paint_stroke)
+                paint_line(G.paint_lx, G.paint_ly, cx, cy, col);
+            else
+                paint_plot(cx, cy, col);
+            G.paint_lx = cx;
+            G.paint_ly = cy;
+            G.paint_stroke = 1;
+            return;
+        }
+    } else {
+        G.paint_stroke = 0;
+    }
+}
+
+static uint32_t ms_rand_u32(void)
+{
+    ms_rng_state = ms_rng_state * 1664525u + 1013904223u;
+    return ms_rng_state;
+}
+
+static void minesweeper_clear_board(void)
+{
+    for (int i = 0; i < MS_CELLS; i++) {
+        G.ms_mine[i] = 0;
+        G.ms_adj[i] = 0;
+        G.ms_vis[i] = 0;
+    }
+    G.ms_started = 0;
+    G.ms_dead = 0;
+    G.ms_win = 0;
+}
+
+static void minesweeper_init(void)
+{
+    minesweeper_clear_board();
+    ms_rng_state ^= timer_get_ms();
+}
+
+static int ms_in_safe_zone(int x, int y, int ax, int ay)
+{
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (x == ax + dx && y == ay + dy) return 1;
+    return 0;
+}
+
+static void ms_build_adj(void)
+{
+    for (int y = 0; y < MS_ROWS; y++) {
+        for (int x = 0; x < MS_COLS; x++) {
+            int i = y * MS_COLS + x;
+            if (G.ms_mine[i]) {
+                G.ms_adj[i] = 9;
+                continue;
+            }
+            int n = 0;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || nx >= MS_COLS || ny < 0 || ny >= MS_ROWS) continue;
+                    if (G.ms_mine[ny * MS_COLS + nx]) n++;
+                }
+            }
+            G.ms_adj[i] = (uint8_t)n;
+        }
+    }
+}
+
+static void ms_place_mines(int ax, int ay)
+{
+    int placed = 0;
+    while (placed < MS_MINES) {
+        int x = (int)(ms_rand_u32() % (uint32_t)MS_COLS);
+        int y = (int)(ms_rand_u32() % (uint32_t)MS_ROWS);
+        if (ms_in_safe_zone(x, y, ax, ay)) continue;
+        int i = y * MS_COLS + x;
+        if (G.ms_mine[i]) continue;
+        G.ms_mine[i] = 1;
+        placed++;
+    }
+    ms_build_adj();
+}
+
+static void ms_expand(int x, int y)
+{
+    if (x < 0 || x >= MS_COLS || y < 0 || y >= MS_ROWS) return;
+    int i = y * MS_COLS + x;
+    if (G.ms_vis[i] == 2) return;
+    if (G.ms_vis[i] == 1) return;
+    if (G.ms_mine[i]) return;
+    G.ms_vis[i] = 1;
+    if (G.ms_adj[i] > 0) return;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ms_expand(x + dx, y + dy);
+        }
+    }
+}
+
+static void ms_reveal_all_mines(void)
+{
+    for (int i = 0; i < MS_CELLS; i++)
+        if (G.ms_mine[i]) G.ms_vis[i] = 1;
+}
+
+static void ms_check_win(void)
+{
+    for (int i = 0; i < MS_CELLS; i++) {
+        if (!G.ms_mine[i] && G.ms_vis[i] != 1) return;
+    }
+    G.ms_win = 1;
+}
+
+static void minesweeper_left_cell(int cx, int cy)
+{
+    if (cx < 0 || cx >= MS_COLS || cy < 0 || cy >= MS_ROWS) return;
+    if (G.ms_dead || G.ms_win) return;
+    int i = cy * MS_COLS + cx;
+    if (G.ms_vis[i] == 2) return;
+    if (!G.ms_started) {
+        ms_place_mines(cx, cy);
+        G.ms_started = 1;
+    }
+    if (G.ms_mine[i]) {
+        G.ms_dead = 1;
+        ms_reveal_all_mines();
+        return;
+    }
+    ms_expand(cx, cy);
+    ms_check_win();
+}
+
+static void minesweeper_right_cell(int cx, int cy)
+{
+    if (cx < 0 || cx >= MS_COLS || cy < 0 || cy >= MS_ROWS) return;
+    if (G.ms_dead || G.ms_win) return;
+    if (!G.ms_started) return;
+    int i = cy * MS_COLS + cx;
+    if (G.ms_vis[i] == 1) return;
+    if (G.ms_vis[i] == 0)
+        G.ms_vis[i] = 2;
+    else if (G.ms_vis[i] == 2)
+        G.ms_vis[i] = 0;
+}
+
+static void minesweeper_new_game(void)
+{
+    minesweeper_clear_board();
+}
+
+static uint8_t ms_digit_color(int n)
+{
+    switch (n) {
+    case 1: return GUI_C_BR_BLUE;
+    case 2: return GUI_C_BR_GREEN;
+    case 3: return GUI_C_BR_RED;
+    case 4: return GUI_C_BR_CYAN;
+    case 5: return GUI_C_BR_MAGENTA;
+    case 6: return GUI_C_CYAN;
+    case 7: return GUI_C_BLACK;
+    case 8: return GUI_C_DKGRAY;
+    default: return GUI_C_BLACK;
+    }
+}
+
 static void fmt_uint(char *buf, uint32_t v)
 {
     int i = 0;
@@ -347,10 +625,11 @@ static void draw_desktop(uint8_t *fb)
         bool top = (z == stack_n - 1);
 
         if (app == APP_PROGRAM_MANAGER) {
-            int ww = 220, wh = 130;
+            int ww = 220, wh = 170;
             gui_draw_window(fb, wx, wy, ww, wh, "Program Manager", top);
-            const char *items[] = { "File Manager", "Calculator", "Notepad", "Clock", "Snake" };
-            for (int i = 0; i < 5; i++) {
+            const char *items[] = { "File Manager", "Calculator", "Notepad", "Clock",
+                                    "Snake", "Paint", "Minesweeper" };
+            for (int i = 0; i < 7; i++) {
                 int bx = wx + 8, by = wy + 18 + i * 20, bw = ww - 16, bh = 16;
                 gui_draw_button(fb, bx, by, bw, bh, items[i], false, G.pm_sel == i && top);
             }
@@ -482,13 +761,82 @@ static void draw_desktop(uint8_t *fb)
             int ww = GRID_W * CELL + 16, wh = GRID_H * CELL + 44;
             gui_draw_window(fb, wx, wy, ww, wh, "Snake", top);
             snake_draw(fb, wx + 8, wy + 18);
+        } else if (app == APP_PAINT) {
+            int ww = 280, wh = 168;
+            gui_draw_window(fb, wx, wy, ww, wh, "Paint", top);
+            gui_draw_button(fb, wx + 8, wy + 18, 44, 14, "Clear", false, false);
+            gui_draw_button(fb, wx + 56, wy + 18, 44, 14, "Brush", false,
+                            G.paint_tool == 0 && top);
+            gui_draw_button(fb, wx + 104, wy + 18, 44, 14, "Erase", false,
+                            G.paint_tool != 0 && top);
+            int cx0 = wx + 8;
+            int cy0 = wy + 18 + PAINT_TOOLBAR_H;
+            gui_draw_fill_rect(fb, cx0 - 1, cy0 - 1, PAINT_CW + 2, PAINT_CH + 2, GUI_C_DKGRAY);
+            for (int y = 0; y < PAINT_CH; y++) {
+                int row = cy0 + y;
+                for (int x = 0; x < PAINT_CW; x++)
+                    fb[row * GUI_FB_W + (cx0 + x)] = G.paint_canvas[y * PAINT_CW + x];
+            }
+            int pal_y = cy0 + PAINT_CH + 4;
+            for (int i = 0; i < 16; i++) {
+                uint8_t hi = (G.paint_color == (uint8_t)i && top) ? GUI_C_WHITE : GUI_C_DKGRAY;
+                gui_draw_fill_rect(fb, wx + 8 + i * 16 - 1, pal_y - 1, 16, 16, hi);
+                gui_draw_fill_rect(fb, wx + 8 + i * 16, pal_y, 14, 14, (uint8_t)i);
+            }
+            gui_draw_text(fb, wx + 6, wy + wh - 12, "drag=draw  C=clear", GUI_C_DKGRAY,
+                          GUI_C_LTGRAY);
+        } else if (app == APP_MINESWEEPER) {
+            int ww = 8 + MS_COLS * MS_CSZ + 8;
+            int wh = 34 + MS_ROWS * MS_CSZ + 22;
+            gui_draw_window(fb, wx, wy, ww, wh, "Minesweeper", top);
+            gui_draw_button(fb, wx + 8, wy + 18, 52, 14, "New", false, false);
+            int gx = wx + 8;
+            int gy = wy + 34;
+            for (int y = 0; y < MS_ROWS; y++) {
+                for (int x = 0; x < MS_COLS; x++) {
+                    int i = y * MS_COLS + x;
+                    int cx = gx + x * MS_CSZ;
+                    int cy = gy + y * MS_CSZ;
+                    if (G.ms_vis[i] == 0) {
+                        gui_draw_fill_rect(fb, cx, cy, MS_CSZ - 1, MS_CSZ - 1, GUI_C_LTGRAY);
+                        gui_draw_fill_rect(fb, cx, cy, MS_CSZ - 1, 1, GUI_C_WHITE);
+                        gui_draw_fill_rect(fb, cx, cy, 1, MS_CSZ - 1, GUI_C_WHITE);
+                        gui_draw_fill_rect(fb, cx + MS_CSZ - 2, cy, 1, MS_CSZ - 1, GUI_C_DKGRAY);
+                        gui_draw_fill_rect(fb, cx, cy + MS_CSZ - 2, MS_CSZ - 1, 1, GUI_C_DKGRAY);
+                    } else if (G.ms_vis[i] == 2) {
+                        gui_draw_fill_rect(fb, cx, cy, MS_CSZ - 1, MS_CSZ - 1, GUI_C_LTGRAY);
+                        gui_draw_text(fb, cx + 3, cy + 3, "F", GUI_C_BR_RED, GUI_C_LTGRAY);
+                    } else if (G.ms_mine[i]) {
+                        gui_draw_fill_rect(fb, cx, cy, MS_CSZ - 1, MS_CSZ - 1,
+                                            G.ms_dead ? GUI_C_BR_RED : GUI_C_MAGENTA);
+                        gui_draw_text(fb, cx + 3, cy + 3, "*", GUI_C_BLACK,
+                                      G.ms_dead ? GUI_C_BR_RED : GUI_C_MAGENTA);
+                    } else {
+                        gui_draw_fill_rect(fb, cx, cy, MS_CSZ - 1, MS_CSZ - 1, GUI_C_LTGRAY);
+                        int a = (int)G.ms_adj[i];
+                        if (a > 0) {
+                            char d[2] = { (char)('0' + a), '\0' };
+                            uint8_t fg = ms_digit_color(a);
+                            gui_draw_text(fb, cx + 3, cy + 3, d, fg, GUI_C_LTGRAY);
+                        }
+                    }
+                }
+            }
+            if (G.ms_win)
+                gui_draw_text(fb, gx, gy + MS_ROWS * MS_CSZ + 4, "YOU WIN", GUI_C_BR_GREEN,
+                              GUI_C_LTGRAY);
+            else if (G.ms_dead)
+                gui_draw_text(fb, gx, gy + MS_ROWS * MS_CSZ + 4, "BOOM", GUI_C_BR_RED,
+                              GUI_C_LTGRAY);
+            gui_draw_text(fb, wx + 6, wy + wh - 12, "L=open r=flag New R", GUI_C_DKGRAY,
+                          GUI_C_LTGRAY);
         }
     }
 }
 
 static void launch_from_pm(int row)
 {
-    if (row < 0 || row > 4) return;
+    if (row < 0 || row > 6) return;
     G.pm_sel = row;
     if (row == 0) {
         fm_refresh();
@@ -509,9 +857,15 @@ static void launch_from_pm(int row)
         G.clk_digit_len = 0;
         G.clk_digits[0] = '\0';
         stack_push(APP_CLOCK);
-    } else {
+    } else if (row == 4) {
         snake_reset();
         stack_push(APP_SNAKE);
+    } else if (row == 5) {
+        paint_init();
+        stack_push(APP_PAINT);
+    } else {
+        minesweeper_init();
+        stack_push(APP_MINESWEEPER);
     }
 }
 
@@ -722,8 +1076,22 @@ static int handle_key(char c)
             G.snake_dir = 3;
         return 0;
     }
+    if (t == APP_PAINT) {
+        if (c == 'c' || c == 'C') {
+            paint_clear_canvas();
+            return 0;
+        }
+        return 0;
+    }
+    if (t == APP_MINESWEEPER) {
+        if (c == 'r' || c == 'R') {
+            minesweeper_new_game();
+            return 0;
+        }
+        return 0;
+    }
     if (t == APP_PROGRAM_MANAGER) {
-        if (c >= '1' && c <= '5')
+        if (c >= '1' && c <= '7')
             launch_from_pm((int)(c - '1'));
         return 0;
     }
@@ -739,14 +1107,31 @@ static void handle_mouse_click(int px, int py)
     AppId t = stack[z];
 
     if (t == APP_PROGRAM_MANAGER) {
-        int ww = 220, wh = 130;
+        int ww = 220, wh = 170;
         if (!gui_draw_hit(px, py, wx, wy, ww, wh)) return;
-        if (!gui_draw_hit(px, py, wx + 8, wy + 18, ww - 16, 100)) return;
+        if (!gui_draw_hit(px, py, wx + 8, wy + 18, ww - 16, 150)) return;
         int rel = py - (wy + 18);
         if (rel < 0) return;
         int row = rel / 20;
-        if (row < 0 || row >= 5) return;
+        if (row < 0 || row >= 7) return;
         launch_from_pm(row);
+        return;
+    }
+    if (t == APP_MINESWEEPER) {
+        int ww = 8 + MS_COLS * MS_CSZ + 8;
+        int wh = 34 + MS_ROWS * MS_CSZ + 22;
+        if (!gui_draw_hit(px, py, wx, wy, ww, wh)) return;
+        if (gui_draw_hit(px, py, wx + 8, wy + 18, 52, 14)) {
+            minesweeper_new_game();
+            return;
+        }
+        int gx = wx + 8;
+        int gy = wy + 34;
+        if (gui_draw_hit(px, py, gx, gy, MS_COLS * MS_CSZ, MS_ROWS * MS_CSZ)) {
+            int cx = (px - gx) / MS_CSZ;
+            int cy = (py - gy) / MS_CSZ;
+            minesweeper_left_cell(cx, cy);
+        }
         return;
     }
     if (t == APP_CALCULATOR) {
@@ -766,6 +1151,25 @@ static void handle_mouse_click(int px, int py)
             calc_key_char('C');
         return;
     }
+}
+
+static void handle_mouse_right_click(int px, int py)
+{
+    int z = stack_n - 1;
+    if (z < 0) return;
+    int wx, wy;
+    win_offset(z, &wx, &wy);
+    AppId t = stack[z];
+    if (t != APP_MINESWEEPER) return;
+    int ww = 8 + MS_COLS * MS_CSZ + 8;
+    int wh = 34 + MS_ROWS * MS_CSZ + 22;
+    if (!gui_draw_hit(px, py, wx, wy, ww, wh)) return;
+    int gx = wx + 8;
+    int gy = wy + 34;
+    if (!gui_draw_hit(px, py, gx, gy, MS_COLS * MS_CSZ, MS_ROWS * MS_CSZ)) return;
+    int cx = (px - gx) / MS_CSZ;
+    int cy = (py - gy) / MS_CSZ;
+    minesweeper_right_cell(cx, cy);
 }
 
 void gui_run(void)
@@ -792,6 +1196,8 @@ void gui_run(void)
     G.clk_digits[0] = '\0';
     G.clk_alarm_armed = 0;
     snake_reset();
+    paint_init();
+    minesweeper_init();
 
     uint8_t *fb = video_mode13_framebuffer();
     gui_draw_apply_palette();
@@ -817,16 +1223,15 @@ void gui_run(void)
             }
         }
 
+        paint_handle_mouse(mx, my, btn, prev_btn);
+
         if ((btn & MOUSE_BTN_LEFT) && !(prev_btn & MOUSE_BTN_LEFT))
             handle_mouse_click(mx, my);
+        if ((btn & MOUSE_BTN_RIGHT) && !(prev_btn & MOUSE_BTN_RIGHT))
+            handle_mouse_right_click(mx, my);
         prev_btn = btn;
 
         draw_desktop(fb);
         __asm__ volatile("hlt");
     }
 }
-</think>
-Fixing errors in `gui.c`: correcting hit-testing, notepad rendering, and removing the invalid function.
-
-<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>
-Read
